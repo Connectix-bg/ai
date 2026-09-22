@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "connectix-docs": {
+      "type": "http",
+      "url": "https://mcp.connectix.bg/mcp"
+    }
+  }
+}

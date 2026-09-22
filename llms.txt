@@ -1,0 +1,91 @@
+# Connectix API
+
+> Connectix is a Bulgarian messaging platform for online shops: SMS, Viber and Noti messages from approved templates, fallback flows (Viber first, SMS if undelivered), one-time passwords, a shared phone blacklist, TrustCheck (cash-on-delivery risk rating of a shopper) and courier shipment tracking with webhooks.
+
+Version 1.0.0. Base URL for every example: `https://api-sandbox.connectix.bg` (the sandbox: delivery is simulated and nothing is billed). Authenticate with the `Authorization` header: the sandbox token as-is, or `Bearer <token>`. Send `Accept: application/json`. Phone numbers are E.164 (`+359...`).
+
+## Guides
+
+- [Quickstart](https://mcp.connectix.bg/docs/quickstart.md)
+- [Authentication](https://mcp.connectix.bg/docs/authentication.md)
+- [Sandbox](https://mcp.connectix.bg/docs/sandbox.md)
+- [Webhooks](https://mcp.connectix.bg/docs/webhooks.md)
+- [Errors](https://mcp.connectix.bg/docs/errors.md)
+- [Build with AI](https://mcp.connectix.bg/docs/build-with-ai.md)
+
+## Endpoints
+
+### Templates
+
+Approved message templates of the company; every message is sent from one.
+
+- `GET /templates` — `listTemplates`: List message templates
+
+### Messages
+
+Send SMS, Viber and Noti messages, fallback flows and Viber documents.
+
+- `POST /messages` — `sendMessage`: Send a message from a template
+- `POST /messages/fallback` — `sendFallbackMessage`: Send a message with fallback steps
+- `POST /messages/media` — `sendMediaMessage`: Send a document over Viber
+
+### OTP
+
+One-time passwords over SMS: send, verify, resend.
+
+- `POST /otp/send` — `sendOtp`: Send a one-time password
+- `POST /otp/verify` — `verifyOtp`: Verify a one-time password
+- `POST /otp/resend` — `resendOtp`: Re-issue a one-time password
+
+### Integrations
+
+Integrations group the traffic of one external system and own the webhook hooks.
+
+- `POST /integration/register` — `registerIntegration`: Register an integration
+- `POST /integration/unregister` — `unregisterIntegration`: Remove an integration
+- `POST /integration/register/hook` — `registerIntegrationHook`: Register a webhook hook on an integration
+- `POST /integration/unregister/hook` — `unregisterIntegrationHook`: Remove a webhook hook
+
+### Blacklist
+
+Phones that must not be messaged; shared with the console and the stop/resume word automation.
+
+- `POST /blacklist` — `addToBlacklist`: Check whether a phone is blacklisted (deprecated alias) (deprecated, sunset 2027-03-31)
+- `POST /blacklist/check` — `checkBlacklist`: Check whether a phone is blacklisted
+- `POST /blacklist/toggle` — `toggleBlacklist`: Add, update or remove a phone in the blacklist
+
+### TrustCheck
+
+Cash-on-delivery risk rating of a shopper, computed from tracked shipments.
+
+- `POST /shopper/check` — `checkShopper`: Check the TrustCheck risk rating of a shopper
+
+### Tracking
+
+Register courier shipments so Connectix tracks them and posts tracking webhooks.
+
+- `POST /shipments` — `createShipment`: Register a shipment for tracking
+- `POST /trackings` — `createTracking`: Register a shipment for tracking (deprecated alias) (deprecated, sunset 2027-03-31)
+
+### Account
+
+Information about the authenticated application and reference data.
+
+- `GET /countries/holidays` — `listHolidays`: List public holidays
+- `GET /me` — `getMe`: Identify the application behind the token
+
+## Webhooks
+
+- `callback` — Posted each time the delivery status changes: to the message's own `callbackUrl` when it has one, otherwise to every active `callback` hook of the integration the message was sent with. Messages sent from campaigns never trigger it. Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+- `inbound` — Posted when the recipient replies: to the message's own `inboundUrl` when it has one, otherwise to every active `inbound` hook of the integration the message was sent with. Replies equal to the application's stop/resume word also toggle the blacklist automatically. Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+- `blacklist` — Posted to the `blacklist` hooks of the application (or of every application of the company when the entry is `global`) whenever an entry is created or changed. Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+- `template` — Posted to the `template` hooks of every active integration of the company within a minute after a template is created or changed, so the integration can keep its local template list in sync with `listTemplates`. Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+- `tracking` — Posted to the `tracking` hooks of the application that registered the shipment (`createShipment`) when the courier reports a new state. Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+
+## Machine-readable
+
+- [OpenAPI 3.0 document, English](https://mcp.connectix.bg/openapi.json)
+- [OpenAPI 3.0 document, Bulgarian](https://mcp.connectix.bg/openapi.bg.json)
+- [Postman collection, sandbox only](https://mcp.connectix.bg/connectix.postman_collection.json) (`?lang=bg` for Bulgarian)
+- [Everything in one file](https://mcp.connectix.bg/llms-full.txt)
+- [MCP server](https://mcp.connectix.bg/mcp): tools `search_docs`, `list_endpoints`, `get_endpoint`, `get_guide`

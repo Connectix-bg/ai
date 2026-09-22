@@ -1,0 +1,25 @@
+{
+    "name": "connectix",
+    "owner": {
+        "name": "Connectix",
+        "url": "https://connectix.bg"
+    },
+    "metadata": {
+        "description": "Official Connectix plugins for AI coding tools"
+    },
+    "plugins": [
+        {
+            "name": "connectix",
+            "source": "./",
+            "description": "Connectix API skill and documentation server: Viber, SMS and Noti messaging, OTP, TrustCheck, blacklist and shipment tracking for Bulgarian businesses. Sandbox only (https://api-sandbox.connectix.bg).",
+            "version": "1.0.0",
+            "category": "development",
+            "keywords": [
+                "connectix",
+                "viber",
+                "sms",
+                "otp"
+            ]
+        }
+    ]
+}

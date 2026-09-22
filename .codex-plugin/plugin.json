@@ -1,0 +1,29 @@
+{
+    "name": "connectix",
+    "version": "1.0.0",
+    "description": "Connectix API skill and documentation server: Viber, SMS and Noti messaging, OTP, TrustCheck, blacklist and shipment tracking for Bulgarian businesses. Sandbox only (https://api-sandbox.connectix.bg).",
+    "author": {
+        "name": "Connectix",
+        "url": "https://connectix.bg"
+    },
+    "homepage": "https://docs.connectix.bg",
+    "repository": "https://github.com/connectix-bg/ai",
+    "license": "MIT",
+    "keywords": [
+        "connectix",
+        "viber",
+        "sms",
+        "noti",
+        "otp"
+    ],
+    "skills": "./skills/",
+    "mcpServers": "./mcp.json",
+    "interface": {
+        "displayName": "Connectix",
+        "shortDescription": "Viber, SMS, Noti and OTP messaging API for Bulgaria",
+        "longDescription": "Connectix API skill and documentation server: Viber, SMS and Noti messaging, OTP, TrustCheck, blacklist and shipment tracking for Bulgarian businesses. Sandbox only (https://api-sandbox.connectix.bg).",
+        "developerName": "Connectix",
+        "category": "Developer tools",
+        "websiteURL": "https://connectix.bg"
+    }
+}

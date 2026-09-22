@@ -1,0 +1,2258 @@
+# Connectix API
+
+> Connectix is a Bulgarian messaging platform for online shops: SMS, Viber and Noti messages from approved templates, fallback flows (Viber first, SMS if undelivered), one-time passwords, a shared phone blacklist, TrustCheck (cash-on-delivery risk rating of a shopper) and courier shipment tracking with webhooks.
+
+Version 1.0.0. Base URL for every example: `https://api-sandbox.connectix.bg` (the sandbox: delivery is simulated and nothing is billed). Authenticate with the `Authorization` header: the sandbox token as-is, or `Bearer <token>`. Send `Accept: application/json`. Phone numbers are E.164 (`+359...`).
+
+## Guides
+
+### Quickstart
+
+### Quickstart
+
+Send your first message from the sandbox in five minutes. Everything on this page runs against `https://api-sandbox.connectix.bg`: delivery is simulated and nothing is billed.
+
+#### 1. Get a sandbox token
+
+In the Connectix console open **Settings → Applications**, pick an application and copy its **sandbox token**. Keep it in an environment variable; never paste it into source code:
+
+```bash
+export CONNECTIX_SANDBOX_TOKEN="paste-the-sandbox-token-here"
+```
+
+The sandbox token only works on `api-sandbox.connectix.bg`. The application also has a live token; that one is for production and is a human decision, see the go-live guide when you are ready.
+
+#### 2. Check who you are
+
+```bash
+curl "https://api-sandbox.connectix.bg/me" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json"
+```
+
+```json
+{"name": "My shop"}
+```
+
+The token goes in the `Authorization` header as-is; `Authorization: Bearer <token>` is accepted too. Always send `Accept: application/json` so errors come back as JSON.
+
+#### 3. Pick a template
+
+Messages are sent from templates approved in the console:
+
+```bash
+curl "https://api-sandbox.connectix.bg/templates" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json"
+```
+
+Use the `id` of a template whose `status` is `approved`. Placeholders in the template text (`{{ orderNumber }}`) are filled from `parameters`.
+
+#### 4. Send a message
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/messages" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "template": "3644d7ac-2a95-4068-863e-6352ed78d667",
+    "phone": "+359888123456",
+    "parameters": {"orderNumber": "10042"},
+    "callbackUrl": "https://example.com/connectix/callback"
+  }'
+```
+
+Phone numbers are E.164: country code, no spaces, no leading zeros (`+359888123456`). The response is the accepted message:
+
+```json
+{
+  "id": "0d1c1c2e-8f2a-4c1e-9c2b-2d1a6d1f7e21",
+  "type": "transactional",
+  "phone": "+359888123456",
+  "message": {"text": "Your order 10042 has shipped."},
+  "price": 0.055,
+  "parts": 1,
+  "channel": "viber",
+  "status": "received",
+  "ttl": 7200,
+  "callbackUrl": "https://example.com/connectix/callback",
+  "createdAt": "2026-01-15T10:30:00+02:00"
+}
+```
+
+`status: received` means accepted for delivery. The sandbox then fakes the rest of the lifecycle and POSTs each status change to `callbackUrl` (see the webhooks guide).
+
+#### 5. Read the errors that matter
+
+| Status | Meaning | What to do |
+|---|---|---|
+| 401 | Missing or wrong token, or a token used on the wrong host | Check the header and that the sandbox token is used on the sandbox host |
+| 402 | Insufficient balance | Top up in the console (the sandbox never returns this) |
+| 422 | A field failed validation; the body maps field paths to messages | Fix the payload |
+| 451 | No signed contract for the channel | Sign the channel contract in the console (the sandbox never returns this) |
+
+The errors guide lists every status the API returns.
+
+#### Next steps
+
+- Viber first, SMS if not delivered: `POST /messages/fallback`.
+- One-time passwords: `POST /otp/send`, `/otp/verify`, `/otp/resend`.
+- Delivery and inbound notifications: the webhooks guide.
+- Let your AI coding tool read these docs: the build-with-ai guide.
+- Postman collection: import `https://mcp.connectix.bg/connectix.postman_collection.json`, set the `token` variable to your sandbox token.
+
+### Authentication
+
+### Authentication
+
+Every request carries an application token in the `Authorization` header. There is no OAuth, no signing and no session.
+
+```bash
+curl "https://api-sandbox.connectix.bg/me" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json"
+```
+
+#### Raw token or Bearer
+
+Both forms are accepted and mean the same thing:
+
+```
+Authorization: 6f1d2c3b-...-9a8b7c6d
+Authorization: Bearer 6f1d2c3b-...-9a8b7c6d
+```
+
+Use whichever your HTTP client produces by default. Tokens are opaque strings (UUID-shaped); never derive anything from their format.
+
+#### Two tokens per application, one per host
+
+Each application in the console has two tokens, and the host decides which one is checked:
+
+| Host | Token that works | Delivery | Billing |
+|---|---|---|---|
+| `api-sandbox.connectix.bg` | sandbox token | simulated | none |
+| the production host | live token | real | real |
+
+A sandbox token sent to the production host, or a live token sent to the sandbox, is simply an unknown token: the API answers **401**. That is by design, so a sandbox integration can never send a real message by accident.
+
+The sandbox token is the one shown on the console's AI tools page and the only one these docs use. The live token stays on the application settings page and is handled by a person, following the go-live guide.
+
+#### Integration tokens
+
+Some operations identify the *integration* (a shop, an automation) rather than the application:
+
+- `POST /integration/register` returns an integration `token` for the `secret` you supply.
+- `POST /shipments` requires that token as the `?integration=` query parameter.
+- `POST /messages` and `POST /messages/fallback` accept the same `?integration=` parameter to attribute the message to an integration.
+
+The application token stays in the `Authorization` header in every case; the integration token is an additional identifier, not a replacement.
+
+#### Keeping tokens safe
+
+- Store tokens in environment variables or your secret store, never in source code, config files committed to git, client-side JavaScript or mobile apps.
+- Rotate a token from the console if it leaks; the old value stops working immediately.
+- Send `Accept: application/json`: without it some error responses are HTML pages.
+
+#### Errors
+
+| Status | Meaning |
+|---|---|
+| 401 | Missing `Authorization` header, unknown token, or the right token on the wrong host |
+| 401 | The company behind the token is not active or its traffic is banned |
+| 403 | The token is valid but this application is restricted from the resource (e.g. TrustCheck) |
+
+### Sandbox
+
+### Sandbox
+
+The sandbox is the same API on a different host, `https://api-sandbox.connectix.bg`, unlocked by the application's **sandbox token**. Build and test there; nothing you send reaches a phone and nothing is billed.
+
+#### What the sandbox does differently
+
+| | Sandbox | Production |
+|---|---|---|
+| Host | `api-sandbox.connectix.bg` | the production host (go-live guide) |
+| Token | sandbox token | live token |
+| Message delivery | simulated: the worker picks a final status at random | real carriers |
+| OTP | codes are created and can be verified, but no SMS is sent | real |
+| Balance check (402) | skipped | enforced |
+| Contract check (451) | skipped | enforced |
+| Pricing | `price` is filled from the price list but nothing is charged | charged |
+| Callbacks | sent, with the simulated statuses | sent |
+
+Because delivery is faked, the sandbox is the right place to test every status transition of your callback handler: `received → sent → delivered`, `undelivered`, `failed`, and the Viber → SMS fallback (`could_not_be_sent` on the first step, then the next step is sent).
+
+#### What behaves exactly like production
+
+Everything that is not "sending": the sandbox token authenticates the same application, so
+
+- `GET /templates` returns the application's real templates; only `approved` ones can be sent.
+- `POST /blacklist/toggle` writes to the real blacklist and `POST /blacklist/check` reads it.
+- `POST /integration/register` and the hook endpoints create real integrations and hooks.
+- `POST /shipments` registers real shipments for tracking.
+- `POST /shopper/check` runs a real TrustCheck query (and needs the same eligibility).
+- Validation, phone parsing and the 4xx responses are identical.
+
+Treat those as real data, because they are.
+
+#### Prerequisites
+
+A fresh account whose sandbox answers 401 or 400 is usually missing one of these:
+
+1. The company is **active** (registration completed and verified in the console); otherwise every request is 401.
+2. At least one **channel service** is configured for the application; otherwise sends answer 400 with a "service not found" message.
+3. For template sends, a template in status `approved`.
+
+#### Not available in the sandbox yet
+
+- `POST /messages/media` has no sandbox implementation; test media messages only after going live, with a test phone.
+
+#### Going live
+
+Switching host and token is a human step with a checklist (contract, balance, approved templates, reachable callback URL). It is described in the go-live guide, which is written for people and is intentionally not part of the AI-readable docs.
+
+### Webhooks
+
+### Webhooks
+
+Connectix notifies your system with plain JSON `POST` requests: message status changes, inbound replies, blacklist changes, template changes and shipment tracking events. Two ways to receive them:
+
+- **Per message**: pass `callbackUrl` (status changes) and `inboundUrl` (Viber replies) in `POST /messages` or `/messages/fallback`.
+- **Per integration**: register an integration once, then register one hook URL per event type. Hooks receive every event of that type for the integration.
+
+Both work in the sandbox; the sandbox sends the simulated statuses.
+
+#### Registering hooks
+
+1. Register the integration (once), with a 32-character secret you generate and keep:
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/integration/register" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "ecommerce", "platform": "MyShop", "secret": "VWAIKyRhzVmGkgDXTxepB1rO49CYKo3C"}'
+```
+
+```json
+{"name": "My shop", "token": "npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl"}
+```
+
+2. Register a hook per event type with the integration `token`:
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/integration/register/hook" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"token": "npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl", "type": "callback", "url": "https://example.com/connectix/callback"}'
+```
+
+```json
+{"id": "f4212b48-a763-42b8-8e43-0ed413255edd"}
+```
+
+Remove a hook with `POST /integration/unregister/hook` and `{"id": "..."}`; remove the whole integration with `POST /integration/unregister` and the token + secret.
+
+#### Event types and payloads
+
+Hook `type` values: `callback`, `inbound`, `blacklist`, `template`, `tracking`.
+
+##### callback — message status
+
+Sent on every status change of a message (not for campaign messages).
+
+```json
+{
+  "id": "0d1c1c2e-8f2a-4c1e-9c2b-2d1a6d1f7e21",
+  "status": "delivered",
+  "channel": "viber",
+  "createdAt": "2026-01-15T10:30:12+02:00",
+  "fallbackId": "7c2f0b1e-5a6d-4f3e-8b9a-1c2d3e4f5a6b"
+}
+```
+
+`fallbackId` is present only for messages sent through `/messages/fallback`. Statuses: `pending`, `processing`, `received`, `scheduled`, `sent`, `delivered`, `seen`, `undelivered`, `failed`, `could_not_be_sent`, `fallback_error`.
+
+##### inbound — a reply from the recipient (Viber)
+
+```json
+{
+  "id": "5f0a2b3c-1d2e-4f5a-9b8c-7d6e5f4a3b2c",
+  "phone": "+359888123456",
+  "sentAt": "2026-01-15T10:35:00+02:00",
+  "text": "Thanks!",
+  "mediaUrl": null,
+  "mediaName": null
+}
+```
+
+##### blacklist — a number was added, changed or removed
+
+```json
+{
+  "id": "f4212b48-a763-42b8-8e43-0ed413255edd",
+  "phone": "+359888123456",
+  "active": true,
+  "permanent": false,
+  "global": false,
+  "expire_at_for_transactional": "2026-01-20T10:30:00+02:00"
+}
+```
+
+Note the snake_case `expire_at_for_transactional`; it is `null` for permanent entries.
+
+##### template — a template was created, changed or approved
+
+The template payload uses snake_case for the button fields (`button_label`, `button_url`), unlike `GET /templates`, which returns `buttonLabel` and `buttonUrl`. Read both when you sync templates.
+
+```json
+{
+  "id": "3644d7ac-2a95-4068-863e-6352ed78d667",
+  "name": "Order shipped",
+  "channel": "viber",
+  "layout": "button",
+  "text": "Your order {{ orderNumber }} has shipped.",
+  "button_label": "Track it",
+  "button_url": "https://example.com/track",
+  "status": "approved"
+}
+```
+
+##### tracking — a shipment event
+
+```json
+{
+  "action": "delivered",
+  "trackingNumber": "1234567890",
+  "deliveryType": "office",
+  "office": "Sofia - Mladost 1",
+  "workingDaysPassed": 2
+}
+```
+
+`deliveryType`, `courier`/`office` and `workingDaysPassed` are present when the courier reports them.
+
+#### Receiving hooks safely
+
+- Hooks are **unsigned** JSON POSTs today. Do not trust a payload by itself: look the `id` up in your own records (the message you sent, the hook you registered) before acting on it. A signature header is on the roadmap.
+- Answer `2xx` within a few seconds and do the work asynchronously. A non-2xx answer or a timeout (5 s, 10 s for tracking hooks) is logged and **not retried**: if a delivery is missed, reconcile through the API (`checkBlacklist`, `listTemplates`, your own message records).
+- Expect duplicates and out-of-order delivery; make handlers idempotent on `id` + `status`.
+- Use HTTPS URLs with a valid certificate; `http://` is accepted but not recommended.
+- In the sandbox the statuses are simulated, so test all transitions there before going live.
+
+### Errors
+
+### Errors
+
+Send `Accept: application/json` on every request; without it some errors are rendered as HTML pages. Error bodies are small JSON values: usually a string, for validation failures an object.
+
+```json
+"Insufficient funds."
+```
+
+```json
+{"[phone]": "This value is not a valid mobile phone number.", "[template]": "This field is missing."}
+```
+
+#### Status codes
+
+| Status | Meaning | What to do |
+|---|---|---|
+| 400 | Bad request: unknown template, template not approved, no channel service configured, text too long, a required field missing | Fix the request; check `GET /templates` for the template status |
+| 401 | Missing or unknown token, token used on the wrong host, or the company is not active | See the authentication guide |
+| 402 | **Insufficient balance**: the company account cannot pay for this message | Top up the balance in the console. The sandbox never returns 402 |
+| 403 | The resource is restricted for this application, or a TrustCheck rule blocks it (`access_restricted`, `trustcheck_no_tracking`, `trustcheck_low_volume`); for OTP: maximum verification attempts exceeded | Contact support, or for TrustCheck enable automatic tracking / reach the daily volume |
+| 404 | Integration, hook or OTP not found | Check the identifier and that it belongs to this application |
+| 406 | Traffic for this company is banned, or there is no sender configured for the recipient's country | Contact support |
+| 410 | The OTP has expired or was already used | Send a new OTP |
+| 422 | Validation failed; the body maps field paths to messages | Fix the listed fields |
+| 429 | OTP rate limit for this phone number | Wait before sending another OTP to the same number |
+| 451 | **No signed contract for this channel** (Viber and Noti require one) | Sign the channel contract in the console under Documents. The sandbox never returns 451 |
+| 500 | Unexpected error | Retry later; report the request id if it persists |
+| 502 | Upstream problem: the phone number could not be parsed, the country is not allowed, or the provider is unavailable | Check the phone is E.164; retry with back-off |
+
+#### Validation errors (422)
+
+Keys are the field paths of the request body in brackets, nested fields as `[contact][firstName]`, array items as `[flow][0][template]`. Every listed field must be fixed; the message is human-readable and not meant to be parsed.
+
+Common causes:
+
+- `phone` not in E.164 (`+359888123456`) or not a mobile number.
+- `template` missing or not a UUID.
+- `ttl` outside 60–86400 seconds (OTP: 60–3600).
+- `callbackUrl` / `inboundUrl` / `url` not an absolute `http(s)://` URL with a hostname.
+- Unknown properties in the body: the validators reject fields they do not know.
+
+#### OTP verification (401 with a body)
+
+`POST /otp/verify` answers 401 with `{"verified": false, "remainingAttempts": 2}` for a wrong code. It is the only 401 that is not an authentication problem.
+
+#### Retrying
+
+- Retry 5xx and network errors with exponential back-off; message sends are not idempotent, so keep your own record of what was accepted (the `id` in the 200 response) before retrying.
+- Never retry 4xx without changing the request, except 429 after the wait.
+
+### Build with AI
+
+### Build with AI
+
+Let your AI coding tool read the Connectix API contract directly: a docs MCP server, plain-text docs for any agent that can fetch a URL, and an installable skill. Everything the tools see targets the sandbox (`https://api-sandbox.connectix.bg`) and the sandbox token; going live stays a human step.
+
+#### The docs MCP server
+
+`https://mcp.connectix.bg/mcp` — HTTP transport, no sign-in, read-only. Four tools:
+
+| Tool | What it returns |
+|---|---|
+| `search_docs` | Ranked hits over endpoint summaries, descriptions and guide headings (`query`, optional `product`, `limit` ≤ 10, `lang`) |
+| `list_endpoints` | operationId, method, path, summary, deprecated/sunset flags (optional `product`) |
+| `get_endpoint` | One endpoint: schema, auth, error table, sandbox notes, a curl example against the sandbox (`operationId`, `lang`: `en` or `bg`) |
+| `get_guide` | One guide as Markdown (`slug`: quickstart, authentication, sandbox, webhooks, errors, build-with-ai) |
+
+##### Install
+
+**Claude Code**
+
+```bash
+claude mcp add --transport http connectix-docs https://mcp.connectix.bg/mcp
+```
+
+**Codex CLI / app**
+
+```bash
+codex mcp add connectix-docs --url https://mcp.connectix.bg/mcp
+```
+
+**Cursor** — `.cursor/mcp.json`:
+
+```json
+{"mcpServers": {"connectix-docs": {"url": "https://mcp.connectix.bg/mcp"}}}
+```
+
+Also add `https://connectix.bg/docs` under Settings › Features › Docs to use `@docs`.
+
+**VS Code / GitHub Copilot** — `.vscode/mcp.json`:
+
+```json
+{"servers": {"connectix-docs": {"type": "http", "url": "https://mcp.connectix.bg/mcp"}}}
+```
+
+**Copilot CLI**
+
+```bash
+copilot mcp add --transport http connectix-docs https://mcp.connectix.bg/mcp
+```
+
+**ChatGPT (web)** — Settings › Developer mode › add a remote MCP server by URL (no authentication).
+
+**Claude.ai, Claude Desktop, Cowork** — Customize › Connectors › Add custom connector › URL `https://mcp.connectix.bg/mcp`, "No sign-in".
+
+**Any agent**
+
+```bash
+npx add-mcp https://mcp.connectix.bg/mcp
+```
+
+Other clients take the same URL: Kiro (`type: http`), Antigravity (`serverUrl`), Devin Desktop (`serverUrl`), Cline (`type: streamableHttp`), OpenCode, Zed and JetBrains (URL only).
+
+#### The skill and plugin
+
+The skill teaches an agent the Connectix conventions in one file: sandbox-first, raw-or-Bearer auth, E.164 phones, the channel matrix, Viber → SMS fallback, the OTP flow, webhooks, what each error status means, and that official WordPress, PrestaShop and OpenCart plugins already exist.
+
+**Skill only, any tool**
+
+```bash
+npx skills add connectix-bg/ai
+```
+
+**Claude Code plugin**
+
+```bash
+claude plugin marketplace add connectix-bg/ai
+claude plugin install connectix@connectix
+```
+
+**Codex plugin**
+
+```bash
+codex plugin marketplace add connectix-bg/ai
+codex plugin add connectix@connectix
+```
+
+**Cursor** — `npx skills add connectix-bg/ai`, then `/add-plugin connectix` after review.
+
+**GitHub Copilot (VS Code)** — settings: `"chat.plugins.marketplaces": ["connectix-bg/ai"]`. Copilot coding agent: copy the `skills/` folder into `.github/skills/`.
+
+#### Plain-text docs for any agent
+
+- `https://mcp.connectix.bg/llms.txt` — the index: guides, endpoints, links.
+- `https://mcp.connectix.bg/llms-full.txt` — everything in one file.
+- `https://mcp.connectix.bg/docs/{slug}.md` — one guide, e.g. `/docs/quickstart.md`; add `?lang=bg` for Bulgarian.
+- `https://mcp.connectix.bg/openapi.json` and `/openapi.bg.json` — the OpenAPI 3.0 document, for Context7, SDK generators and `@docs`.
+- `https://mcp.connectix.bg/connectix.postman_collection.json` — Postman collection (v2.1): every endpoint against the sandbox, with `baseUrl` and `token` variables.
+
+#### A note for your repo
+
+Paste this into `AGENTS.md`, `CLAUDE.md` or `GEMINI.md` so every session starts with the right defaults:
+
+```markdown
+## Connectix messaging API
+- Docs MCP: connectix-docs (https://mcp.connectix.bg/mcp); read llms.txt at https://mcp.connectix.bg/llms.txt before writing code.
+- Use https://api-sandbox.connectix.bg with the sandbox token from the environment variable CONNECTIX_SANDBOX_TOKEN. Do not switch hosts or tokens; going live is done by a person following the go-live guide.
+- Authorization header: raw token or "Bearer <token>". Always send Accept: application/json.
+- Phone numbers are E.164. 451 = no signed contract for the channel; 402 = balance; 422 = validation, body lists the fields.
+```
+
+#### Why sandbox only
+
+An AI tool that can read these docs can write working code, and code that works in the sandbox works in production after a human swaps the host and the token. Keeping the production host and the live token out of every AI-facing surface means no generated snippet, tool result or example can send a real, billed message by accident. When you are ready, a person follows the go-live guide.
+
+## Endpoints
+
+### Templates
+
+Approved message templates of the company; every message is sent from one.
+
+#### List message templates
+
+`GET /templates`
+
+- Operation: `listTemplates`
+- Tags: Templates
+- Product: sms
+- Base URL: https://api-sandbox.connectix.bg
+
+Returns every template of the company (all channels, all statuses). Use it to find the `id` of an **approved** template before calling `sendMessage`; the template determines the channel, the message type and which `{{ placeholder }}` parameters must be supplied. Templates are created and approved by humans in the console - there is no API to create them.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Templates of the company. Returns array of object (Template). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `[].id` | string (uuid) | Template ID to pass as `template` when sending. |
+| `[].media` | string, nullable | Public URL of the template image/file, if any. |
+| `[].layout` | string, one of: text, button, image, advanced, file, carousel |  |
+| `[].name` | string |  |
+| `[].channel` | object (Channel), one of: sms, viber, noti | Messaging channel. `noti` is the Connectix in-app notification channel. |
+| `[].text` | string, nullable | Text with `{{ placeholder }}` variables that must be supplied in `parameters`. |
+| `[].buttonLabel` | string, nullable |  |
+| `[].buttonUrl` | string, nullable |  |
+| `[].status` | string, one of: pending, approved, waiting_information, rejected | Only `approved` templates can be sent; other statuses are rejected with 400 `The template was not found.` |
+
+```json
+[
+    {
+        "id": "3644d7ac-2a95-4068-863e-6352ed78d667",
+        "media": null,
+        "layout": "button",
+        "name": "Order shipped",
+        "channel": "viber",
+        "text": "Your order #{{ order_id }} has been shipped.",
+        "buttonLabel": "Track order",
+        "buttonUrl": "https://shop.example.com/orders/{{ order_id }}",
+        "status": "approved"
+    }
+]
+```
+
+##### Example request
+
+```bash
+curl -X GET "https://api-sandbox.connectix.bg/templates" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json"
+```
+
+### Messages
+
+Send SMS, Viber and Noti messages, fallback flows and Viber documents.
+
+#### Send a message from a template
+
+`POST /messages`
+
+- Operation: `sendMessage`
+- Tags: Messages
+- Product: sms
+- Base URL: https://api-sandbox.connectix.bg
+
+Sends one SMS, Viber or Noti message to one recipient using an approved template. The response is returned as soon as the message is accepted (`status: received`); delivery happens asynchronously and is reported through the `callback` webhook (`callbackUrl` or integration hooks). Replies arrive on the `inbound` webhook.
+
+Phone numbers must be in E.164 format. Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+**402** means the account balance cannot cover the message price (`Insufficient funds.`) - top up the account before retrying. **451** means the company has not signed the contract for the channel the template uses (`There is no signed contract for channel "viber"`) - a human must sign it in the console; retrying does not help.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Sandbox host accepts the same payload and delivers nothing: delivery is simulated (each message ends as `delivered` or `undelivered` at random), price is always `0.0000`, balance and contract checks are skipped, a status webhook is posted to `callbackUrl` about 5 seconds later and a simulated inbound reply is posted to `inboundUrl` about 15 seconds after a delivered Viber message. The sandbox only ever calls `callbackUrl`/`inboundUrl`, never the integration's hooks.
+
+##### Parameters
+
+| Name | In | Required | Type | Description |
+|---|---|---|---|---|
+| `integration` | query | no | string | Integration token obtained from `registerIntegration`. When present, the message is attributed to that integration and its active `callback`/`inbound` hooks receive the status and reply webhooks - but only when the body has no `callbackUrl`/`inboundUrl`: a per-message URL always wins and the integration hooks are then not called. |
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `phone` | string | yes | Recipient mobile number. Send it in E.164 format (`+359881234567`). National formats are parsed against the countries enabled for the application, but E.164 is the only format that is guaranteed to work. Landline numbers are rejected with 422. |
+| `template` | string (uuid) | yes | UUID of an **approved** template from `listTemplates`. The template decides the channel and the message type. |
+| `parameters` | object | no | Values for the `{{ placeholder }}` variables used in the template text, button label and button URL. |
+| `ttl` | integer | no | Seconds the provider may keep trying to deliver the message. Defaults to 7200 for Viber/Noti and 43200 for SMS. In a fallback flow the TTL of a step bounds how long the next step waits. |
+| `callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. |
+| `inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. |
+| `contact` | object (Contact) | no | Optional contact record that is created or updated in the address book when the message is accepted. `firstName` and `lastName` are also injected into the template parameters as `first_name`/`last_name`. |
+| `contact.firstName` | string | yes | Given name. Required when `contact` is present. |
+| `contact.lastName` | string | no | Family name. |
+| `contact.groups` | array of string | no | Contact group names the contact is added to. |
+| `contact.addGroupIfMissing` | boolean | no | Create groups from `groups` that do not exist yet. |
+| `contact.parameters` | object | no | Free-form custom fields stored on the contact. |
+
+Example:
+
+```json
+{
+    "phone": "+359881234567",
+    "template": "3644d7ac-2a95-4068-863e-6352ed78d667",
+    "parameters": {
+        "order_id": "10422"
+    },
+    "callbackUrl": "https://shop.example.com/webhooks/connectix/status",
+    "inboundUrl": "https://shop.example.com/webhooks/connectix/inbound",
+    "contact": {
+        "firstName": "Ivan",
+        "lastName": "Ivanov",
+        "groups": [
+            "Customers"
+        ],
+        "addGroupIfMissing": true,
+        "parameters": {
+            "customerId": "10422"
+        }
+    }
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Message accepted. Returns object (Message). |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 402 | Insufficient funds: the balance does not cover the price of the message. Top up the account before retrying. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 451 | The company has not signed the contract for the channel of the template. A human must sign it in the console (Documents); retrying does not help. Returns object (Error). |
+| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | string (uuid) | Message ID. The same value is sent as `id` in the `callback` and `inbound` webhooks. |
+| `type` | object (MessageType), one of: transactional, promotional | Message type; it follows the template/service configuration. Promotional messages always respect the blacklist. |
+| `phone` | string | Recipient in E.164 format. |
+| `message` | object (MessageContent) | Rendered content that was sent. |
+| `message.text` | string, nullable | Rendered message text. |
+| `message.imageUrl` | string (uri) | Image URL (Viber image/advanced layouts only). |
+| `message.button` | object (MessageButton) |  |
+| `message.button.label` | string |  |
+| `message.button.url` | string (uri) |  |
+| `price` | string | Price charged for the message as a decimal string with four decimals, in the account currency (EUR). Always `0.0000` on the sandbox. |
+| `parts` | integer | Number of SMS parts (1 for Viber/Noti). |
+| `channel` | object (Channel), one of: sms, viber, noti | Messaging channel. `noti` is the Connectix in-app notification channel. |
+| `status` | object (MessageStatus), one of: pending, received, scheduled, processing, sent, delivered, seen, undelivered, failed, could_not_be_sent, not_used | Lifecycle: `received` (accepted by the API) -> `processing` -> `sent` -> `delivered` -> `seen` (Viber/Noti only). Terminal failures: `undelivered` (expired, not a Viber/Noti user, opted out), `failed`, `could_not_be_sent`. `scheduled` means the queue was unavailable and the message will be picked up by the scheduler. |
+| `ttl` | integer, nullable | Effective delivery TTL in seconds. |
+| `callbackUrl` | string, nullable | Status webhook URL attached to this message. |
+| `inboundUrl` | string, nullable | Reply webhook URL. Present for Viber messages only. |
+| `sender` | string, nullable | Sender ID used. Present for SMS messages only. |
+| `createdAt` | string (date-time) | RFC 3339 timestamp. |
+| `position` | integer | Step position. Present only for messages that belong to a fallback flow. |
+| `fallbackId` | string (uuid) | ID of the fallback flow. Present only for messages that belong to a fallback flow. |
+
+```json
+{
+    "id": "8b2f1c0e-5d3a-4e7b-9f21-0c6a7d4e5b12",
+    "type": "transactional",
+    "phone": "+359881234567",
+    "message": {
+        "text": "Your order #10422 has been shipped.",
+        "button": {
+            "label": "Track order",
+            "url": "https://shop.example.com/orders/10422"
+        }
+    },
+    "price": "0.0550",
+    "parts": 1,
+    "channel": "viber",
+    "status": "received",
+    "ttl": 7200,
+    "callbackUrl": "https://shop.example.com/webhooks/connectix/status",
+    "inboundUrl": "https://shop.example.com/webhooks/connectix/inbound",
+    "createdAt": "2026-09-20T10:15:30+03:00"
+}
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/messages?integration=npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"+359881234567","template":"3644d7ac-2a95-4068-863e-6352ed78d667","parameters":{"order_id":"10422"},"callbackUrl":"https://shop.example.com/webhooks/connectix/status","inboundUrl":"https://shop.example.com/webhooks/connectix/inbound","contact":{"firstName":"Ivan","lastName":"Ivanov","groups":["Customers"],"addGroupIfMissing":true,"parameters":{"customerId":"10422"}}}'
+```
+
+#### Send a message with fallback steps
+
+`POST /messages/fallback`
+
+- Operation: `sendFallbackMessage`
+- Tags: Messages
+- Product: sms
+- Base URL: https://api-sandbox.connectix.bg
+
+Sends a multi-step flow to one recipient: the first step is sent immediately and each following step is sent only if the previous one ends as `undelivered` (for example Viber first, SMS if the recipient is not on Viber). Steps are ordered by `position` and the TTL of a step bounds how long the next step waits. Every step message carries the same `fallbackId` in its `callback` webhooks.
+
+Phone numbers must be in E.164 format. Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+**402** means the account balance cannot cover the message price (`Insufficient funds.`) - top up the account before retrying. **451** means the company has not signed the contract for the channel the template uses (`There is no signed contract for channel "viber"`) - a human must sign it in the console; retrying does not help.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Sandbox host accepts the same payload and delivers nothing: delivery is simulated (each message ends as `delivered` or `undelivered` at random), price is always `0.0000`, balance and contract checks are skipped, a status webhook is posted to `callbackUrl` about 5 seconds later and a simulated inbound reply is posted to `inboundUrl` about 15 seconds after a delivered Viber message. The sandbox only ever calls `callbackUrl`/`inboundUrl`, never the integration's hooks.
+
+##### Parameters
+
+| Name | In | Required | Type | Description |
+|---|---|---|---|---|
+| `integration` | query | no | string | Integration token obtained from `registerIntegration`. When present, the message is attributed to that integration and its active `callback`/`inbound` hooks receive the status and reply webhooks - but only when the body has no `callbackUrl`/`inboundUrl`: a per-message URL always wins and the integration hooks are then not called. |
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `phone` | string | yes | Recipient mobile number. Send it in E.164 format (`+359881234567`). National formats are parsed against the countries enabled for the application, but E.164 is the only format that is guaranteed to work. Landline numbers are rejected with 422. |
+| `contact` | object (Contact) | no | Optional contact record that is created or updated in the address book when the message is accepted. `firstName` and `lastName` are also injected into the template parameters as `first_name`/`last_name`. |
+| `contact.firstName` | string | yes | Given name. Required when `contact` is present. |
+| `contact.lastName` | string | no | Family name. |
+| `contact.groups` | array of string | no | Contact group names the contact is added to. |
+| `contact.addGroupIfMissing` | boolean | no | Create groups from `groups` that do not exist yet. |
+| `contact.parameters` | object | no | Free-form custom fields stored on the contact. |
+| `flow` | array of object (FallbackStep) | yes | At least two steps, typically Viber first and SMS second. |
+| `flow[].template` | string (uuid) | yes | UUID of an approved template. |
+| `flow[].position` | integer | yes | Order of the step, starting at 1. |
+| `flow[].parameters` | object | no | Template parameters for this step. |
+| `flow[].ttl` | integer | no | Seconds the provider may keep trying to deliver the message. Defaults to 7200 for Viber/Noti and 43200 for SMS. In a fallback flow the TTL of a step bounds how long the next step waits. |
+| `flow[].callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. |
+| `flow[].inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. |
+
+Example:
+
+```json
+{
+    "phone": "+359881234567",
+    "flow": [
+        {
+            "template": "3644d7ac-2a95-4068-863e-6352ed78d667",
+            "position": 1,
+            "parameters": {
+                "order_id": "10422"
+            },
+            "ttl": 3600
+        },
+        {
+            "template": "cdea4406-ae6c-4cbc-9571-40882795d17e",
+            "position": 2,
+            "parameters": {
+                "order_id": "10422"
+            }
+        }
+    ]
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Flow accepted; contains the first step message. Returns object (FallbackResponse). |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 402 | Insufficient funds: the balance does not cover the price of the message. Top up the account before retrying. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 451 | The company has not signed the contract for the channel of the template. A human must sign it in the console (Documents); retrying does not help. Returns object (Error). |
+| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | string (uuid) | Fallback flow ID (equals `fallbackId` in the step messages and webhooks). |
+| `flow` | array of object (Message) | Messages created so far (the first step). |
+| `flow[].id` | string (uuid) | Message ID. The same value is sent as `id` in the `callback` and `inbound` webhooks. |
+| `flow[].type` | object (MessageType), one of: transactional, promotional | Message type; it follows the template/service configuration. Promotional messages always respect the blacklist. |
+| `flow[].phone` | string | Recipient in E.164 format. |
+| `flow[].message` | object (MessageContent) | Rendered content that was sent. |
+| `flow[].message.text` | string, nullable | Rendered message text. |
+| `flow[].message.imageUrl` | string (uri) | Image URL (Viber image/advanced layouts only). |
+| `flow[].message.button` | object (MessageButton) |  |
+| `flow[].price` | string | Price charged for the message as a decimal string with four decimals, in the account currency (EUR). Always `0.0000` on the sandbox. |
+| `flow[].parts` | integer | Number of SMS parts (1 for Viber/Noti). |
+| `flow[].channel` | object (Channel), one of: sms, viber, noti | Messaging channel. `noti` is the Connectix in-app notification channel. |
+| `flow[].status` | object (MessageStatus), one of: pending, received, scheduled, processing, sent, delivered, seen, undelivered, failed, could_not_be_sent, not_used | Lifecycle: `received` (accepted by the API) -> `processing` -> `sent` -> `delivered` -> `seen` (Viber/Noti only). Terminal failures: `undelivered` (expired, not a Viber/Noti user, opted out), `failed`, `could_not_be_sent`. `scheduled` means the queue was unavailable and the message will be picked up by the scheduler. |
+| `flow[].ttl` | integer, nullable | Effective delivery TTL in seconds. |
+| `flow[].callbackUrl` | string, nullable | Status webhook URL attached to this message. |
+| `flow[].inboundUrl` | string, nullable | Reply webhook URL. Present for Viber messages only. |
+| `flow[].sender` | string, nullable | Sender ID used. Present for SMS messages only. |
+| `flow[].createdAt` | string (date-time) | RFC 3339 timestamp. |
+| `flow[].position` | integer | Step position. Present only for messages that belong to a fallback flow. |
+| `flow[].fallbackId` | string (uuid) | ID of the fallback flow. Present only for messages that belong to a fallback flow. |
+| `createdAt` | string (date-time) |  |
+
+```json
+{
+    "id": "a1c3e5f7-9b2d-4f6e-8a0c-1d3e5f7a9b2c",
+    "flow": [
+        {
+            "id": "8b2f1c0e-5d3a-4e7b-9f21-0c6a7d4e5b12",
+            "type": "transactional",
+            "phone": "+359881234567",
+            "message": {
+                "text": "Your order #10422 has been shipped.",
+                "button": {
+                    "label": "Track order",
+                    "url": "https://shop.example.com/orders/10422"
+                }
+            },
+            "price": "0.0550",
+            "parts": 1,
+            "channel": "viber",
+            "status": "received",
+            "ttl": 7200,
+            "callbackUrl": "https://shop.example.com/webhooks/connectix/status",
+            "inboundUrl": "https://shop.example.com/webhooks/connectix/inbound",
+            "createdAt": "2026-09-20T10:15:30+03:00",
+            "position": 1,
+            "fallbackId": "a1c3e5f7-9b2d-4f6e-8a0c-1d3e5f7a9b2c"
+        }
+    ],
+    "createdAt": "2026-09-20T10:15:30+03:00"
+}
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/messages/fallback?integration=npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"+359881234567","flow":[{"template":"3644d7ac-2a95-4068-863e-6352ed78d667","position":1,"parameters":{"order_id":"10422"},"ttl":3600},{"template":"cdea4406-ae6c-4cbc-9571-40882795d17e","position":2,"parameters":{"order_id":"10422"}}]}'
+```
+
+#### Send a document over Viber
+
+`POST /messages/media`
+
+- Operation: `sendMediaMessage`
+- Tags: Messages
+- Product: viber
+- Base URL: https://api-sandbox.connectix.bg
+
+Sends a document (PDF, Office, text, spreadsheet) to one recipient over Viber without a template. Connectix downloads the file from `fileUrl`, so the URL must be publicly reachable. Delivery is reported through the `callback` webhook like any other message. Media messages are always typed `promotional` and the response carries `message.text: null` (the file name is not echoed). Because of the `promotional` type, `checkBlacklist` with `type=promotional` answers `yes` for any active blacklist entry regardless of `expire_at_for_transactional` - call it before sending.
+
+Phone numbers must be in E.164 format. Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application. This endpoint has no sandbox implementation yet: on `https://api-sandbox.connectix.bg` it answers **404** `{"error": "not_available_on_sandbox"}` and sends nothing. Exercise the sandbox with `sendMessage` instead; media sends work on the production host after go-live.
+
+**402** means the account balance cannot cover the message price (`Insufficient funds.`) - top up the account before retrying. **451** means the company has not signed the contract for the channel the template uses (`There is no signed contract for channel "viber"`) - a human must sign it in the console; retrying does not help.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Not implemented on the sandbox host: it answers 404 `{"error": "not_available_on_sandbox"}` and nothing is sent or charged. Available on production only after go-live.
+
+##### Parameters
+
+| Name | In | Required | Type | Description |
+|---|---|---|---|---|
+| `integration` | query | no | string | Integration token obtained from `registerIntegration`. When present, the message is attributed to that integration and its active `callback`/`inbound` hooks receive the status and reply webhooks - but only when the body has no `callbackUrl`/`inboundUrl`: a per-message URL always wins and the integration hooks are then not called. |
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `phone` | string | yes | Recipient mobile number. Send it in E.164 format (`+359881234567`). National formats are parsed against the countries enabled for the application, but E.164 is the only format that is guaranteed to work. Landline numbers are rejected with 422. |
+| `fileUrl` | string (uri) | yes | Public HTTPS URL of the document. |
+| `fileType` | string, one of: doc, docx, rtf, dot, dotx, odt, odf, fodt, txt, info, pdf, xps, pdax, eps, xls, xlsx, ods, fods, csv, xlsm, xltx | yes | File extension of the document. |
+| `fileName` | string | yes | File name shown to the recipient. |
+| `ttl` | integer | no | Seconds the provider may keep trying to deliver the message. Defaults to 7200 for Viber/Noti and 43200 for SMS. In a fallback flow the TTL of a step bounds how long the next step waits. |
+| `callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. |
+| `inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. |
+| `contact` | object (Contact) | no | Optional contact record that is created or updated in the address book when the message is accepted. `firstName` and `lastName` are also injected into the template parameters as `first_name`/`last_name`. |
+| `contact.firstName` | string | yes | Given name. Required when `contact` is present. |
+| `contact.lastName` | string | no | Family name. |
+| `contact.groups` | array of string | no | Contact group names the contact is added to. |
+| `contact.addGroupIfMissing` | boolean | no | Create groups from `groups` that do not exist yet. |
+| `contact.parameters` | object | no | Free-form custom fields stored on the contact. |
+
+Example:
+
+```json
+{
+    "phone": "+359881234567",
+    "fileUrl": "https://shop.example.com/invoices/10422.pdf",
+    "fileType": "pdf",
+    "fileName": "Invoice 10422.pdf",
+    "callbackUrl": "https://shop.example.com/webhooks/connectix/status"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Message accepted. Returns object (Message). |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 402 | Insufficient funds: the balance does not cover the price of the message. Top up the account before retrying. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 404 | Sandbox host only: media messages have no sandbox implementation. Nothing was sent or charged; use `sendMessage` to exercise the sandbox. Returns object (ErrorObject). |
+| 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
+| 415 | The body is not `application/json`. Multipart uploads are not supported; reference the file by URL. Returns object (Error). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 451 | The company has not signed the contract for the channel of the template. A human must sign it in the console (Documents); retrying does not help. Returns object (Error). |
+| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | string (uuid) | Message ID. The same value is sent as `id` in the `callback` and `inbound` webhooks. |
+| `type` | object (MessageType), one of: transactional, promotional | Message type; it follows the template/service configuration. Promotional messages always respect the blacklist. |
+| `phone` | string | Recipient in E.164 format. |
+| `message` | object (MessageContent) | Rendered content that was sent. |
+| `message.text` | string, nullable | Rendered message text. |
+| `message.imageUrl` | string (uri) | Image URL (Viber image/advanced layouts only). |
+| `message.button` | object (MessageButton) |  |
+| `message.button.label` | string |  |
+| `message.button.url` | string (uri) |  |
+| `price` | string | Price charged for the message as a decimal string with four decimals, in the account currency (EUR). Always `0.0000` on the sandbox. |
+| `parts` | integer | Number of SMS parts (1 for Viber/Noti). |
+| `channel` | object (Channel), one of: sms, viber, noti | Messaging channel. `noti` is the Connectix in-app notification channel. |
+| `status` | object (MessageStatus), one of: pending, received, scheduled, processing, sent, delivered, seen, undelivered, failed, could_not_be_sent, not_used | Lifecycle: `received` (accepted by the API) -> `processing` -> `sent` -> `delivered` -> `seen` (Viber/Noti only). Terminal failures: `undelivered` (expired, not a Viber/Noti user, opted out), `failed`, `could_not_be_sent`. `scheduled` means the queue was unavailable and the message will be picked up by the scheduler. |
+| `ttl` | integer, nullable | Effective delivery TTL in seconds. |
+| `callbackUrl` | string, nullable | Status webhook URL attached to this message. |
+| `inboundUrl` | string, nullable | Reply webhook URL. Present for Viber messages only. |
+| `sender` | string, nullable | Sender ID used. Present for SMS messages only. |
+| `createdAt` | string (date-time) | RFC 3339 timestamp. |
+| `position` | integer | Step position. Present only for messages that belong to a fallback flow. |
+| `fallbackId` | string (uuid) | ID of the fallback flow. Present only for messages that belong to a fallback flow. |
+
+```json
+{
+    "id": "8b2f1c0e-5d3a-4e7b-9f21-0c6a7d4e5b12",
+    "type": "promotional",
+    "phone": "+359881234567",
+    "message": {
+        "text": null
+    },
+    "price": "0.0550",
+    "parts": 1,
+    "channel": "viber",
+    "status": "received",
+    "ttl": 7200,
+    "callbackUrl": "https://shop.example.com/webhooks/connectix/status",
+    "inboundUrl": "https://shop.example.com/webhooks/connectix/inbound",
+    "createdAt": "2026-09-20T10:15:30+03:00"
+}
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/messages/media?integration=npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"+359881234567","fileUrl":"https://shop.example.com/invoices/10422.pdf","fileType":"pdf","fileName":"Invoice 10422.pdf","callbackUrl":"https://shop.example.com/webhooks/connectix/status"}'
+```
+
+### OTP
+
+One-time passwords over SMS: send, verify, resend.
+
+#### Send a one-time password
+
+`POST /otp/send`
+
+- Operation: `sendOtp`
+- Tags: OTP
+- Product: otp
+- Base URL: https://api-sandbox.connectix.bg
+
+Generates a numeric code, sends it by SMS to the phone and returns the OTP `id` to use with `verifyOtp`. The code itself is never returned on production. Rate limited per phone and application (default 5 per hour, returns 429).
+
+Phone numbers must be in E.164 format. Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+**402** means the account balance cannot cover the message price (`Insufficient funds.`) - top up the account before retrying.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Sandbox host issues a real OTP record but sends no SMS; the response additionally contains `code` so the verify flow can be exercised end to end. The balance check is skipped (OTP has no contract check on either host). An unparsable phone returns 422 instead of 502.
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `phone` | string | yes | Recipient mobile number. Send it in E.164 format (`+359881234567`). National formats are parsed against the countries enabled for the application, but E.164 is the only format that is guaranteed to work. Landline numbers are rejected with 422. |
+| `text` | string | no | Custom SMS text; must contain the `{{code}}` placeholder. Defaults to the application's OTP template (`Connectix - Your verification code is: {{code}}`). |
+| `ttl` | integer | no | Seconds until the code expires. Default 300. |
+| `codeLength` | integer | no | Number of digits. Default 6. |
+| `maxAttempts` | integer | no | Verification attempts allowed before the OTP is locked. Default 3. |
+| `purpose` | string | no | Free-text label stored with the OTP (e.g. `login`, `checkout`). |
+| `callbackUrl` | string (uri) | no | URL that receives the `callback` webhook for the SMS carrying the code. |
+
+Example:
+
+```json
+{
+    "phone": "+359881234567",
+    "ttl": 300,
+    "codeLength": 6,
+    "maxAttempts": 3,
+    "purpose": "checkout"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | OTP issued and SMS queued. Returns object (Otp). |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 402 | Insufficient funds: the balance does not cover the price of the message. Top up the account before retrying. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 500 | Unexpected server error while processing the OTP. Safe to retry once. Returns object (Error). |
+| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | string (uuid) | OTP ID to pass to `verifyOtp` / `resendOtp`. |
+| `expiresAt` | string (date-time), nullable |  |
+| `maxAttempts` | integer |  |
+| `channel` | string, one of: sms | OTPs are always sent over SMS. |
+| `code` | string | The generated code. **Sandbox only** - never returned on production. |
+
+```json
+{
+    "id": "c9d8e7f6-a5b4-4c3d-9e2f-1a0b9c8d7e6f",
+    "expiresAt": "2026-09-20T10:20:30+03:00",
+    "maxAttempts": 3,
+    "channel": "sms"
+}
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/otp/send" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"+359881234567","ttl":300,"codeLength":6,"maxAttempts":3,"purpose":"checkout"}'
+```
+
+#### Verify a one-time password
+
+`POST /otp/verify`
+
+- Operation: `verifyOtp`
+- Tags: OTP
+- Product: otp
+- Base URL: https://api-sandbox.connectix.bg
+
+Checks the code the user entered against the OTP `id`. A wrong code returns **401** with `remainingAttempts`; once the attempts are exhausted every further call returns **403**; an expired or already verified OTP returns **410**. Successful verification is final - the OTP cannot be verified twice.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Sandbox host works against OTPs issued on the sandbox host; nothing is sent.
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `id` | string (uuid) | yes | OTP ID from `sendOtp` or `resendOtp`. |
+| `code` | string | yes | Digits entered by the user. |
+
+Example:
+
+```json
+{
+    "id": "c9d8e7f6-a5b4-4c3d-9e2f-1a0b9c8d7e6f",
+    "code": "482913"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Code accepted. Returns object (OtpVerified). |
+| 401 | Wrong code (`OtpRejected`), or missing/invalid application token (plain string). Returns any. |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
+| 410 | The OTP has already expired or has already been used. Issue a new one with `sendOtp`. Returns object (Error). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 500 | Unexpected server error while processing the OTP. Safe to retry once. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `verified` | boolean, one of: 1 |  |
+| `verifiedAt` | string (date-time), nullable |  |
+
+```json
+{
+    "verified": true,
+    "verifiedAt": "2026-09-20T10:16:02+03:00"
+}
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/otp/verify" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"c9d8e7f6-a5b4-4c3d-9e2f-1a0b9c8d7e6f","code":"482913"}'
+```
+
+#### Re-issue a one-time password
+
+`POST /otp/resend`
+
+- Operation: `resendOtp`
+- Tags: OTP
+- Product: otp
+- Base URL: https://api-sandbox.connectix.bg
+
+Expires the OTP identified by `id`, generates a new code with the same length, attempts and TTL, sends it by SMS and returns the **new** OTP - verify with the new `id`. Counts against the same hourly rate limit as `sendOtp`.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+**402** means the account balance cannot cover the message price (`Insufficient funds.`) - top up the account before retrying.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Sandbox host works against OTPs issued on the sandbox host; nothing is sent.
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `id` | string (uuid) | yes | ID of the OTP to replace. It is expired and a new OTP with a new `id` is issued. |
+
+Example:
+
+```json
+{
+    "id": "c9d8e7f6-a5b4-4c3d-9e2f-1a0b9c8d7e6f"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | New OTP issued. Returns object (Otp). |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 402 | Insufficient funds: the balance does not cover the price of the message. Top up the account before retrying. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
+| 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
+| 410 | The OTP has already expired or has already been used. Issue a new one with `sendOtp`. Returns object (Error). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 500 | Unexpected server error while processing the OTP. Safe to retry once. Returns object (Error). |
+| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | string (uuid) | OTP ID to pass to `verifyOtp` / `resendOtp`. |
+| `expiresAt` | string (date-time), nullable |  |
+| `maxAttempts` | integer |  |
+| `channel` | string, one of: sms | OTPs are always sent over SMS. |
+| `code` | string | The generated code. **Sandbox only** - never returned on production. |
+
+```json
+{
+    "id": "0e1d2c3b-4a59-4687-9c0d-1e2f3a4b5c6d",
+    "expiresAt": "2026-09-20T10:20:30+03:00",
+    "maxAttempts": 3,
+    "channel": "sms"
+}
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/otp/resend" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"c9d8e7f6-a5b4-4c3d-9e2f-1a0b9c8d7e6f"}'
+```
+
+### Integrations
+
+Integrations group the traffic of one external system and own the webhook hooks.
+
+#### Register an integration
+
+`POST /integration/register`
+
+- Operation: `registerIntegration`
+- Tags: Integrations
+- Product: account
+- Base URL: https://api-sandbox.connectix.bg
+
+Creates (or re-activates) an integration of the application and returns its `token`. An integration groups the messages and shipments created by one external system and owns the webhook hooks registered with `registerIntegrationHook`. Pass the token as the `integration` query parameter when sending messages and shipments. Registering again with the same `secret` returns the existing integration.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `type` | string, one of: ecommerce, automation, custom | yes | Kind of system that integrates. |
+| `platform` | string | yes | Free-text platform name, e.g. `WooCommerce`, `PrestaShop`, `Make`. |
+| `secret` | string | yes | Caller-generated secret of exactly 32 characters. Re-registering with the same secret returns the same integration and token. |
+
+Example:
+
+```json
+{
+    "type": "ecommerce",
+    "platform": "WooCommerce",
+    "secret": "VWAIKyRhzVmGkgDXTxepB1rO49CYKo3C"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Integration registered. Returns object (Integration). |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `name` | string | Name of the application the token belongs to. |
+| `token` | string | Integration token (64 characters). Use it as the `integration` query parameter when sending messages and shipments, and as `token` when registering hooks. |
+
+```json
+{
+    "name": "Web shop",
+    "token": "npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl"
+}
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/integration/register" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"ecommerce","platform":"WooCommerce","secret":"VWAIKyRhzVmGkgDXTxepB1rO49CYKo3C"}'
+```
+
+#### Remove an integration
+
+`POST /integration/unregister`
+
+- Operation: `unregisterIntegration`
+- Tags: Integrations
+- Product: account
+- Base URL: https://api-sandbox.connectix.bg
+
+Deletes the integration identified by `token` and `secret`, together with all of its hooks. Messages already attributed to it are kept.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `token` | string | yes | Integration token returned by `registerIntegration`. |
+| `secret` | string | yes | The secret used at registration. |
+
+Example:
+
+```json
+{
+    "token": "npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl",
+    "secret": "VWAIKyRhzVmGkgDXTxepB1rO49CYKo3C"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Integration removed. Returns object (OkAnswer), one of: ok. |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+
+###### 200 response
+
+```json
+"ok"
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/integration/unregister" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl","secret":"VWAIKyRhzVmGkgDXTxepB1rO49CYKo3C"}'
+```
+
+#### Register a webhook hook on an integration
+
+`POST /integration/register/hook`
+
+- Operation: `registerIntegrationHook`
+- Tags: Integrations
+- Product: account
+- Base URL: https://api-sandbox.connectix.bg
+
+Subscribes a URL to one event type of the integration. Register one hook per `type` you need: `callback` (delivery status), `inbound` (replies), `template` (template changes), `tracking` (shipment events), `blacklist` (blacklist changes). Each hook receives HTTP POSTs with the JSON payload documented in the webhook definitions.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `token` | string | yes | Integration token returned by `registerIntegration`. |
+| `type` | object (HookType), one of: callback, inbound, template, tracking, blacklist | yes | `callback` = message delivery status, `inbound` = reply from a recipient, `template` = a template was created or changed, `tracking` = shipment tracking event, `blacklist` = a blacklist entry changed. See the webhook definitions for the payloads. |
+| `url` | string (uri) | yes | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the webhook POST. |
+
+Example:
+
+```json
+{
+    "token": "npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl",
+    "type": "callback",
+    "url": "https://shop.example.com/webhooks/connectix/status"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Hook registered. Returns object (Hook). |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | string (uuid) | Hook ID; pass it to `unregisterIntegrationHook`. |
+
+```json
+{
+    "id": "f4212b48-a763-42b8-8e43-0ed413255edd"
+}
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/integration/register/hook" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl","type":"callback","url":"https://shop.example.com/webhooks/connectix/status"}'
+```
+
+#### Remove a webhook hook
+
+`POST /integration/unregister/hook`
+
+- Operation: `unregisterIntegrationHook`
+- Tags: Integrations
+- Product: account
+- Base URL: https://api-sandbox.connectix.bg
+
+Deletes a hook by the `id` returned at registration. The hook must belong to an integration of this application.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `id` | string (uuid) | yes | Hook ID returned by `registerIntegrationHook`. |
+
+Example:
+
+```json
+{
+    "id": "f4212b48-a763-42b8-8e43-0ed413255edd"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Hook removed. Returns object (OkAnswer), one of: ok. |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+
+###### 200 response
+
+```json
+"ok"
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/integration/unregister/hook" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"f4212b48-a763-42b8-8e43-0ed413255edd"}'
+```
+
+### Blacklist
+
+Phones that must not be messaged; shared with the console and the stop/resume word automation.
+
+#### Check whether a phone is blacklisted (deprecated alias)
+
+`POST /blacklist`
+
+- Operation: `addToBlacklist`
+- Tags: Blacklist
+- Product: blacklist
+- Base URL: https://api-sandbox.connectix.bg
+- Deprecated: yes (sunset 2027-03-31)
+
+> **Deprecated.** This operation will be removed on 2027-03-31. Prefer the replacement named in the description.
+
+Deprecated alias of `checkBlacklist` (`POST /blacklist/check`) with the same body and answer. Do not use it in new integrations; it is scheduled for removal on 2027-03-31.
+
+Phone numbers must be in E.164 format. Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `phone` | string | yes | Recipient mobile number. Send it in E.164 format (`+359881234567`). National formats are parsed against the countries enabled for the application, but E.164 is the only format that is guaranteed to work. Landline numbers are rejected with 422. |
+| `type` | string, one of: transactional, promotional | no | Type of message you intend to send. For `transactional` a non-permanent entry expires after the application's blacklist validity; `promotional` entries never expire. |
+
+Example:
+
+```json
+{
+    "phone": "+359881234567",
+    "type": "promotional"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | `yes` if blocked, `no` otherwise. Returns object (BlacklistAnswer), one of: yes, no. |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
+
+###### 200 response
+
+```json
+"no"
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/blacklist" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"+359881234567","type":"promotional"}'
+```
+
+#### Check whether a phone is blacklisted
+
+`POST /blacklist/check`
+
+- Operation: `checkBlacklist`
+- Tags: Blacklist
+- Product: blacklist
+- Base URL: https://api-sandbox.connectix.bg
+
+Answers `yes` when the phone must not receive a message of the given `type`. Entries can be added through `toggleBlacklist`, in the console, or automatically when a recipient replies with the application's stop word. Promotional messages are always blocked by an active entry; transactional ones only until `expire_at_for_transactional`. When the blacklist feature is disabled for the application the answer is always `no`.
+
+Phone numbers must be in E.164 format. Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `phone` | string | yes | Recipient mobile number. Send it in E.164 format (`+359881234567`). National formats are parsed against the countries enabled for the application, but E.164 is the only format that is guaranteed to work. Landline numbers are rejected with 422. |
+| `type` | string, one of: transactional, promotional | no | Type of message you intend to send. For `transactional` a non-permanent entry expires after the application's blacklist validity; `promotional` entries never expire. |
+
+Example:
+
+```json
+{
+    "phone": "+359881234567",
+    "type": "promotional"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | `yes` if blocked, `no` otherwise. Returns object (BlacklistAnswer), one of: yes, no. |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
+
+###### 200 response
+
+```json
+"no"
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/blacklist/check" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"+359881234567","type":"promotional"}'
+```
+
+#### Add, update or remove a phone in the blacklist
+
+`POST /blacklist/toggle`
+
+- Operation: `toggleBlacklist`
+- Tags: Blacklist
+- Product: blacklist
+- Base URL: https://api-sandbox.connectix.bg
+
+Creates or updates the blacklist entry for the phone. `active: true` blocks the number, `active: false` unblocks it; `permanent: true` keeps it blocked for transactional messages too; `global: true` makes the entry apply to every application of the company (their `checkBlacklist` answers `yes`) and announces the change to all of their `blacklist` hooks; otherwise it applies to this application only and only its `blacklist` hooks are notified.
+
+Phone numbers must be in E.164 format. Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `phone` | string | yes | Recipient mobile number. Send it in E.164 format (`+359881234567`). National formats are parsed against the countries enabled for the application, but E.164 is the only format that is guaranteed to work. Landline numbers are rejected with 422. |
+| `active` | boolean | no | `true` blocks the number, `false` unblocks it. |
+| `permanent` | boolean | no | When `true` the entry never expires, even for transactional messages. |
+| `global` | boolean | no | When `true` the entry applies to every application of the company (their `checkBlacklist` answers `yes`) and the change is announced to all of their `blacklist` hooks; when `false` it applies to this application only. |
+
+Example:
+
+```json
+{
+    "phone": "+359881234567",
+    "active": true,
+    "permanent": false,
+    "global": false
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Current state of the entry. Returns object (BlacklistEntry). |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | string (uuid) |  |
+| `phone` | string | E.164 phone number. |
+| `active` | boolean |  |
+| `permanent` | boolean |  |
+| `global` | boolean |  |
+| `expire_at_for_transactional` | string (date-time), nullable | When the entry stops blocking transactional messages; `null` for permanent entries or when the application has no blacklist validity. |
+
+```json
+{
+    "id": "7d6c5b4a-3f2e-4d1c-8b0a-9f8e7d6c5b4a",
+    "phone": "+359881234567",
+    "active": true,
+    "permanent": false,
+    "global": false,
+    "expire_at_for_transactional": "2026-09-27T10:15:30+03:00"
+}
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/blacklist/toggle" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"+359881234567","active":true,"permanent":false,"global":false}'
+```
+
+### TrustCheck
+
+Cash-on-delivery risk rating of a shopper, computed from tracked shipments.
+
+#### Check the TrustCheck risk rating of a shopper
+
+`POST /shopper/check`
+
+- Operation: `checkShopper`
+- Tags: TrustCheck
+- Product: trustcheck
+- Base URL: https://api-sandbox.connectix.bg
+
+Returns the risk that the shopper behind the phone number refuses or does not collect a cash-on-delivery parcel, computed from the shipment history tracked by Connectix across merchants. Use it before confirming a COD order.
+
+TrustCheck requires automatic shipment tracking to be active for at least one courier profile and at least 10 tracked shipments per day; below 10 shipments/day for 7 consecutive days the service suspends and reactivates automatically once 10 shipments are reached in a day. 403 codes: `access_restricted` (disabled by staff), `trustcheck_no_tracking` (no courier profile with automatic tracking), `trustcheck_low_volume` (suspended by the volume rule).
+
+Phone numbers must be in E.164 format; an unparsable phone returns 400 here. Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts; returns the real rating and applies the same eligibility rules (nothing is mocked).
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `phone` | string | yes | Recipient mobile number. Send it in E.164 format (`+359881234567`). National formats are parsed against the countries enabled for the application, but E.164 is the only format that is guaranteed to work. Landline numbers are rejected with 422. |
+
+Example:
+
+```json
+{
+    "phone": "+359881234567"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Risk rating. Returns object (RiskRating), one of: no_info, low, medium, high, ultra_high. |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+
+###### 200 response
+
+```json
+"medium"
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/shopper/check" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"+359881234567"}'
+```
+
+### Tracking
+
+Register courier shipments so Connectix tracks them and posts tracking webhooks.
+
+#### Register a shipment for tracking
+
+`POST /shipments`
+
+- Operation: `createShipment`
+- Tags: Tracking
+- Product: tracking
+- Base URL: https://api-sandbox.connectix.bg
+
+Registers a courier shipment so Connectix tracks it, feeds TrustCheck and posts `tracking` webhooks on every state change. The courier is detected from the tracking number format. The shipment is attributed to the integration passed in `?integration=`. Re-registering an existing tracking number is idempotent. When the courier profile of the application has automatic shipment fetching enabled the shipment is not created here (it arrives automatically) but the call still answers `ok`.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
+
+##### Parameters
+
+| Name | In | Required | Type | Description |
+|---|---|---|---|---|
+| `integration` | query | yes | string | Integration token obtained from `registerIntegration`. The shipment is attributed to that integration and its `tracking` hooks receive the events. (A deprecated `token` body field is still accepted instead.) |
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `trackingNumber` | string | yes | Courier tracking number. The courier (Econt, Speedy, Evropat, Sameday, BoxNow) is detected from its format. |
+| `phone` | string | no | Recipient phone in E.164 format. Used to link the shipment to a contact and to TrustCheck; an unparsable value is ignored. |
+| `token` | string | no | Deprecated: integration token in the body. Use the `integration` query parameter instead. |
+
+Example:
+
+```json
+{
+    "trackingNumber": "1053912345678",
+    "phone": "+359881234567"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Shipment registered (or already known). Returns object (OkAnswer), one of: ok. |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
+
+###### 200 response
+
+```json
+"ok"
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/shipments?integration=npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"trackingNumber":"1053912345678","phone":"+359881234567"}'
+```
+
+#### Register a shipment for tracking (deprecated alias)
+
+`POST /trackings`
+
+- Operation: `createTracking`
+- Tags: Tracking
+- Product: tracking
+- Base URL: https://api-sandbox.connectix.bg
+- Deprecated: yes (sunset 2027-03-31)
+
+> **Deprecated.** This operation will be removed on 2027-03-31. Prefer the replacement named in the description.
+
+Deprecated alias of `createShipment` (`POST /shipments`) with the same parameters, body and answer. Do not use it in new integrations; it is scheduled for removal on 2027-03-31.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
+
+##### Parameters
+
+| Name | In | Required | Type | Description |
+|---|---|---|---|---|
+| `integration` | query | yes | string | Integration token obtained from `registerIntegration`. The shipment is attributed to that integration and its `tracking` hooks receive the events. (A deprecated `token` body field is still accepted instead.) |
+
+##### Request body
+
+Content type: `application/json`. Required.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `trackingNumber` | string | yes | Courier tracking number. The courier (Econt, Speedy, Evropat, Sameday, BoxNow) is detected from its format. |
+| `phone` | string | no | Recipient phone in E.164 format. Used to link the shipment to a contact and to TrustCheck; an unparsable value is ignored. |
+| `token` | string | no | Deprecated: integration token in the body. Use the `integration` query parameter instead. |
+
+Example:
+
+```json
+{
+    "trackingNumber": "1053912345678",
+    "phone": "+359881234567"
+}
+```
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Shipment registered (or already known). Returns object (OkAnswer), one of: ok. |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
+| 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
+
+###### 200 response
+
+```json
+"ok"
+```
+
+##### Example request
+
+```bash
+curl -X POST "https://api-sandbox.connectix.bg/trackings?integration=npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/json" \
+  -d '{"trackingNumber":"1053912345678","phone":"+359881234567"}'
+```
+
+### Account
+
+Information about the authenticated application and reference data.
+
+#### List public holidays
+
+`GET /countries/holidays`
+
+- Operation: `listHolidays`
+- Tags: Account
+- Product: account
+- Base URL: https://api-sandbox.connectix.bg
+
+Returns the non-working days of the current year for a country as `YYYY-MM-DD` dates - the same calendar Connectix uses to count working days for couriers and campaign scheduling. Only Bulgaria (`bg`) is supported; any other value returns 400.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Parameters
+
+| Name | In | Required | Type | Description |
+|---|---|---|---|---|
+| `country` | query | yes | string, one of: bg | ISO 3166-1 alpha-2 country code, case-insensitive. Only `bg` is supported. |
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | Sorted list of dates. Returns array of string (date). |
+| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+
+###### 200 response
+
+```json
+[
+    "2026-01-01",
+    "2026-03-03",
+    "2026-04-10",
+    "2026-04-13",
+    "2026-05-01",
+    "2026-05-06",
+    "2026-05-25",
+    "2026-09-07",
+    "2026-09-22",
+    "2026-12-24",
+    "2026-12-25",
+    "2026-12-28"
+]
+```
+
+##### Example request
+
+```bash
+curl -X GET "https://api-sandbox.connectix.bg/countries/holidays?country=bg" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json"
+```
+
+#### Identify the application behind the token
+
+`GET /me`
+
+- Operation: `getMe`
+- Tags: Account
+- Product: account
+- Base URL: https://api-sandbox.connectix.bg
+
+Returns the name of the application the token belongs to. Use it to verify a token and the host you are talking to before doing anything else.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | The authenticated application. Returns object (Me). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `name` | string | Name of the application the token belongs to. |
+
+```json
+{
+    "name": "Web shop"
+}
+```
+
+##### Example request
+
+```bash
+curl -X GET "https://api-sandbox.connectix.bg/me" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json"
+```
+
+## Webhooks
+
+Webhooks are JSON POST requests from Connectix to the URL registered with `registerIntegrationHook`. They carry no signature today: validate the payload against your own records before acting on it.
+
+### callback
+
+Posted each time the delivery status changes: to the message's own `callbackUrl` when it has one, otherwise to every active `callback` hook of the integration the message was sent with. Messages sent from campaigns never trigger it.
+
+Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `id` | string (uuid) | yes | Message ID as returned when the message was created. |
+| `status` | object (MessageStatus), one of: pending, received, scheduled, processing, sent, delivered, seen, undelivered, failed, could_not_be_sent, not_used | yes | Lifecycle: `received` (accepted by the API) -> `processing` -> `sent` -> `delivered` -> `seen` (Viber/Noti only). Terminal failures: `undelivered` (expired, not a Viber/Noti user, opted out), `failed`, `could_not_be_sent`. `scheduled` means the queue was unavailable and the message will be picked up by the scheduler. |
+| `channel` | object (Channel), one of: sms, viber, noti | yes | Messaging channel. `noti` is the Connectix in-app notification channel. |
+| `createdAt` | string (date-time) | yes | When the status was recorded. |
+| `fallbackId` | string (uuid) | no | Present when the message belongs to a fallback flow. |
+
+```json
+{
+    "id": "8b2f1c0e-5d3a-4e7b-9f21-0c6a7d4e5b12",
+    "status": "delivered",
+    "channel": "viber",
+    "createdAt": "2026-09-20T10:15:41+03:00"
+}
+```
+
+### inbound
+
+Posted when the recipient replies: to the message's own `inboundUrl` when it has one, otherwise to every active `inbound` hook of the integration the message was sent with. Replies equal to the application's stop/resume word also toggle the blacklist automatically.
+
+Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `id` | string (uuid) | yes | ID of the outbound message the recipient replied to. |
+| `phone` | string | yes | Sender phone in E.164 format. |
+| `sentAt` | string (date-time) | yes |  |
+| `text` | string, nullable | yes | Reply text; `null` for media-only replies. |
+| `mediaUrl` | string, nullable | yes | Download URL of an attached image or file. |
+| `mediaName` | string, nullable | yes |  |
+| `type` | string, one of: text, image, file | no | Kind of reply. Present on production; the sandbox simulator omits it, so do not require it when validating sandbox webhooks. |
+
+```json
+{
+    "id": "8b2f1c0e-5d3a-4e7b-9f21-0c6a7d4e5b12",
+    "phone": "+359881234567",
+    "sentAt": "2026-09-20T10:17:05+03:00",
+    "text": "Thanks!",
+    "mediaUrl": null,
+    "mediaName": null,
+    "type": "text"
+}
+```
+
+### blacklist
+
+Posted to the `blacklist` hooks of the application (or of every application of the company when the entry is `global`) whenever an entry is created or changed.
+
+Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `id` | string (uuid) | yes |  |
+| `phone` | string | yes | E.164 phone number. |
+| `active` | boolean | yes |  |
+| `permanent` | boolean | yes |  |
+| `global` | boolean | yes |  |
+| `expire_at_for_transactional` | string (date-time), nullable | yes |  |
+
+```json
+{
+    "id": "7d6c5b4a-3f2e-4d1c-8b0a-9f8e7d6c5b4a",
+    "phone": "+359881234567",
+    "active": true,
+    "permanent": false,
+    "global": false,
+    "expire_at_for_transactional": "2026-09-27T10:15:30+03:00"
+}
+```
+
+### template
+
+Posted to the `template` hooks of every active integration of the company within a minute after a template is created or changed, so the integration can keep its local template list in sync with `listTemplates`.
+
+Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `id` | string (uuid) | yes |  |
+| `media` | string, nullable | yes |  |
+| `layout` | string, one of: text, button, image, advanced, file, carousel | yes |  |
+| `name` | string | yes |  |
+| `channel` | object (Channel), one of: sms, viber, noti | yes | Messaging channel. `noti` is the Connectix in-app notification channel. |
+| `text` | string, nullable | yes |  |
+| `button_label` | string, nullable | yes |  |
+| `button_url` | string, nullable | yes |  |
+| `status` | string, one of: pending, approved, waiting_information, rejected | yes |  |
+
+```json
+{
+    "id": "3644d7ac-2a95-4068-863e-6352ed78d667",
+    "media": null,
+    "layout": "button",
+    "name": "Order shipped",
+    "channel": "viber",
+    "text": "Your order #{{ order_id }} has been shipped.",
+    "button_label": "Track order",
+    "button_url": "https://shop.example.com/orders/{{ order_id }}",
+    "status": "approved"
+}
+```
+
+### tracking
+
+Posted to the `tracking` hooks of the application that registered the shipment (`createShipment`) when the courier reports a new state.
+
+Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+
+| Property | Type | Required | Description |
+|---|---|---|---|
+| `action` | string, one of: dispatched, readyForDelivery, notPickedUp, delivered, returned, returnedRefused, returnedAfterCheck, returnedNotPickedUp | yes |  |
+| `trackingNumber` | string | yes |  |
+| `deliveryType` | string, one of: office, door, aps | no | Only with `readyForDelivery`. `aps` = automated parcel station. |
+| `courier` | string, nullable | no | Courier details (name/phone) for door delivery. Only with `readyForDelivery` and `deliveryType: door`. |
+| `office` | string, nullable | no | Pick-up office/locker details. With `readyForDelivery` (office/aps) and `notPickedUp`. |
+| `workingDaysPassed` | integer, nullable | no | Working days the parcel has been waiting. Only with `notPickedUp`. |
+
+```json
+{
+    "action": "readyForDelivery",
+    "trackingNumber": "1053912345678",
+    "deliveryType": "office",
+    "office": "Econt Sofia - Mladost 1, bl. 25"
+}
+```
