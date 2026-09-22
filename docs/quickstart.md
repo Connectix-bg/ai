@@ -47,15 +47,22 @@ curl -X POST "https://api-sandbox.connectix.bg/messages" \
   -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
   -H "Accept: application/json" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6f1d2c3b-4a5e-4f60-9b8a-7c6d5e4f3a2b" \
   -d '{
     "template": "3644d7ac-2a95-4068-863e-6352ed78d667",
     "phone": "+359888123456",
     "parameters": {"orderNumber": "10042"},
+    "reference": "order-10042-shipped",
     "callbackUrl": "https://example.com/connectix/callback"
   }'
 ```
 
-Phone numbers are E.164: country code, no spaces, no leading zeros (`+359888123456`). The response is the accepted message:
+Phone numbers are E.164: country code, no spaces, no leading zeros (`+359888123456`). Two optional things worth using from day one:
+
+- `reference` is your own id for the message (an order id, an event id). It comes back in the answer and in every webhook, so you never need a mapping table.
+- `Idempotency-Key` (a fresh UUID per send) makes a retry safe: if the connection drops and you repeat the request with the same key, you get the stored answer back with `Idempotent-Replayed: true` and no second message is sent.
+
+The response is the accepted message:
 
 ```json
 {
@@ -69,6 +76,7 @@ Phone numbers are E.164: country code, no spaces, no leading zeros (`+3598881234
   "status": "received",
   "ttl": 7200,
   "callbackUrl": "https://example.com/connectix/callback",
+  "reference": "order-10042-shipped",
   "createdAt": "2026-01-15T10:30:00+02:00"
 }
 ```
@@ -88,6 +96,7 @@ The errors guide lists every status the API returns.
 
 ## Next steps
 
+- Read a message back (a missed webhook, a reconciliation run): `GET /messages/{id}`, or `GET /messages?reference=order-10042-shipped`.
 - Viber first, SMS if not delivered: `POST /messages/fallback`.
 - One-time passwords: `POST /otp/send`, `/otp/verify`, `/otp/resend`.
 - Delivery and inbound notifications: the webhooks guide.

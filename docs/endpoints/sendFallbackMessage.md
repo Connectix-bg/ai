@@ -13,6 +13,8 @@ Phone numbers must be in E.164 format. Authenticate with the application token i
 
 **402** means the account balance cannot cover the message price (`Insufficient funds.`) - top up the account before retrying. **451** means the company has not signed the contract for the channel the template uses (`There is no signed contract for channel "viber"`) - a human must sign it in the console; retrying does not help.
 
+Send an `Idempotency-Key` header (a fresh UUID per logical send) so a network timeout can be retried without a second message; the repeat returns the stored answer with `Idempotent-Replayed: true`.
+
 ## Authentication
 
 Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
@@ -26,6 +28,7 @@ Sandbox host accepts the same payload and delivers nothing: delivery is simulate
 | Name | In | Required | Type | Description |
 |---|---|---|---|---|
 | `integration` | query | no | string | Integration token obtained from `registerIntegration`. When present, the message is attributed to that integration and its active `callback`/`inbound` hooks receive the status and reply webhooks - but only when the body has no `callbackUrl`/`inboundUrl`: a per-message URL always wins and the integration hooks are then not called. |
+| `Idempotency-Key` | header | no | string | Makes a retry of this request safe. The first request with a key runs normally and its 2xx answer is stored for 24 hours; every repeat of the same key from the same application on the same host returns that stored answer unchanged, with `Idempotent-Replayed: true`, and nothing is sent again. A repeat with a different body, path or host answers **422**; a repeat while the first request is still running answers **409** `in_progress` (retry after `retry_after` seconds). Non-2xx answers are not stored, so the same key can be retried after the request is fixed. Use a fresh UUID per logical send. |
 
 ## Request body
 
@@ -45,8 +48,9 @@ Content type: `application/json`. Required.
 | `flow[].position` | integer | yes | Order of the step, starting at 1. |
 | `flow[].parameters` | object | no | Template parameters for this step. |
 | `flow[].ttl` | integer | no | Seconds the provider may keep trying to deliver the message. Defaults to 7200 for Viber/Noti and 43200 for SMS. In a fallback flow the TTL of a step bounds how long the next step waits. |
-| `flow[].callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. |
-| `flow[].inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. |
+| `flow[].callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. Must be publicly reachable (see `sendMessage`). |
+| `flow[].inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. Must be publicly reachable (see `sendMessage`). |
+| `reference` | string | no | Your own reference for the whole flow. Every step message answers and calls back with it. |
 
 Example:
 
@@ -83,7 +87,8 @@ Example:
 | 402 | Insufficient funds: the balance does not cover the price of the message. Top up the account before retrying. Returns object (Error). |
 | 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
 | 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
-| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 409 | The same `Idempotency-Key` is still being processed by another request. Returns object (InProgressError). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Also answered when an `Idempotency-Key` is reused with a different request (`[idempotencyKey]`). Returns object (Error). |
 | 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
 | 451 | The company has not signed the contract for the channel of the template. A human must sign it in the console (Documents); retrying does not help. Returns object (Error). |
 | 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
@@ -112,6 +117,8 @@ Example:
 | `flow[].createdAt` | string (date-time) | RFC 3339 timestamp. |
 | `flow[].position` | integer | Step position. Present only for messages that belong to a fallback flow. |
 | `flow[].fallbackId` | string (uuid) | ID of the fallback flow. Present only for messages that belong to a fallback flow. |
+| `flow[].reference` | string, nullable | The `reference` the message was created with, or null. |
+| `flow[].updatedAt` | string (date-time) | When the message last changed (status included). Present in `getMessage` and `listMessages` answers only. |
 | `createdAt` | string (date-time) |  |
 
 ```json
@@ -138,7 +145,8 @@ Example:
             "inboundUrl": "https://shop.example.com/webhooks/connectix/inbound",
             "createdAt": "2026-09-20T10:15:30+03:00",
             "position": 1,
-            "fallbackId": "a1c3e5f7-9b2d-4f6e-8a0c-1d3e5f7a9b2c"
+            "fallbackId": "a1c3e5f7-9b2d-4f6e-8a0c-1d3e5f7a9b2c",
+            "reference": null
         }
     ],
     "createdAt": "2026-09-20T10:15:30+03:00"

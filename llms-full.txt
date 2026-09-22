@@ -2,7 +2,7 @@
 
 > Connectix is a Bulgarian messaging platform for online shops: SMS, Viber and Noti messages from approved templates, fallback flows (Viber first, SMS if undelivered), one-time passwords, a shared phone blacklist, TrustCheck (cash-on-delivery risk rating of a shopper) and courier shipment tracking with webhooks.
 
-Version 1.0.0. Base URL for every example: `https://api-sandbox.connectix.bg` (the sandbox: delivery is simulated and nothing is billed). Authenticate with the `Authorization` header: the sandbox token as-is, or `Bearer <token>`. Send `Accept: application/json`. Phone numbers are E.164 (`+359...`).
+Version 1.2.0. Base URL for every example: `https://api-sandbox.connectix.bg` (the sandbox: delivery is simulated and nothing is billed). Authenticate with the `Authorization` header: the sandbox token as-is, or `Bearer <token>`. Send `Accept: application/json`. Phone numbers are E.164 (`+359...`).
 
 ## Guides
 
@@ -55,15 +55,22 @@ curl -X POST "https://api-sandbox.connectix.bg/messages" \
   -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
   -H "Accept: application/json" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6f1d2c3b-4a5e-4f60-9b8a-7c6d5e4f3a2b" \
   -d '{
     "template": "3644d7ac-2a95-4068-863e-6352ed78d667",
     "phone": "+359888123456",
     "parameters": {"orderNumber": "10042"},
+    "reference": "order-10042-shipped",
     "callbackUrl": "https://example.com/connectix/callback"
   }'
 ```
 
-Phone numbers are E.164: country code, no spaces, no leading zeros (`+359888123456`). The response is the accepted message:
+Phone numbers are E.164: country code, no spaces, no leading zeros (`+359888123456`). Two optional things worth using from day one:
+
+- `reference` is your own id for the message (an order id, an event id). It comes back in the answer and in every webhook, so you never need a mapping table.
+- `Idempotency-Key` (a fresh UUID per send) makes a retry safe: if the connection drops and you repeat the request with the same key, you get the stored answer back with `Idempotent-Replayed: true` and no second message is sent.
+
+The response is the accepted message:
 
 ```json
 {
@@ -77,6 +84,7 @@ Phone numbers are E.164: country code, no spaces, no leading zeros (`+3598881234
   "status": "received",
   "ttl": 7200,
   "callbackUrl": "https://example.com/connectix/callback",
+  "reference": "order-10042-shipped",
   "createdAt": "2026-01-15T10:30:00+02:00"
 }
 ```
@@ -96,6 +104,7 @@ The errors guide lists every status the API returns.
 
 #### Next steps
 
+- Read a message back (a missed webhook, a reconciliation run): `GET /messages/{id}`, or `GET /messages?reference=order-10042-shipped`.
 - Viber first, SMS if not delivered: `POST /messages/fallback`.
 - One-time passwords: `POST /otp/send`, `/otp/verify`, `/otp/resend`.
 - Delivery and inbound notifications: the webhooks guide.
@@ -192,7 +201,8 @@ Everything that is not "sending": the sandbox token authenticates the same appli
 - `POST /integration/register` and the hook endpoints create real integrations and hooks.
 - `POST /shipments` registers real shipments for tracking.
 - `POST /shopper/check` runs a real TrustCheck query (and needs the same eligibility).
-- Validation, phone parsing and the 4xx responses are identical.
+- `Idempotency-Key`, `reference`, `GET /messages/{id}` and `GET /messages` work the same way (on the sandbox messages).
+- Validation, phone parsing and the 4xx responses are identical, including the public-URL rule for `callbackUrl`/`inboundUrl`.
 
 Treat those as real data, because they are.
 
@@ -265,15 +275,17 @@ Sent on every status change of a message (not for campaign messages).
 
 ```json
 {
+  "eventId": "c1f4b7a2-3d5e-4f60-8a9b-1c2d3e4f5a6b",
   "id": "0d1c1c2e-8f2a-4c1e-9c2b-2d1a6d1f7e21",
   "status": "delivered",
   "channel": "viber",
   "createdAt": "2026-01-15T10:30:12+02:00",
+  "reference": "order-10042-shipped",
   "fallbackId": "7c2f0b1e-5a6d-4f3e-8b9a-1c2d3e4f5a6b"
 }
 ```
 
-`fallbackId` is present only for messages sent through `/messages/fallback`. Statuses: `pending`, `processing`, `received`, `scheduled`, `sent`, `delivered`, `seen`, `undelivered`, `failed`, `could_not_be_sent`, `fallback_error`.
+`eventId` is unique per delivery attempt group (see below). `reference` is the value you sent with the message and is present only then. `fallbackId` is present only for messages sent through `/messages/fallback`. Statuses: `pending`, `processing`, `received`, `scheduled`, `sent`, `delivered`, `seen`, `undelivered`, `failed`, `could_not_be_sent`, `fallback_error`.
 
 ##### inbound — a reply from the recipient (Viber)
 
@@ -334,12 +346,53 @@ The template payload uses snake_case for the button fields (`button_label`, `but
 
 `deliveryType`, `courier`/`office` and `workingDaysPassed` are present when the courier reports them.
 
+#### Every event: `eventId` and headers
+
+Every delivery carries a globally unique `eventId` in the body and the same value in the `X-Connectix-Event-Id` header. Deliveries are **at-least-once**: a receiver that timed out after processing gets the same event again, so drop what you have already seen by `eventId`. The order of events is not guaranteed; order by the event's own timestamp (`createdAt`, `sentAt`).
+
+#### Signature
+
+Deliveries to an **integration hook** are signed with the integration `secret` you chose at `POST /integration/register`. Two headers come with each request:
+
+| Header | Value |
+|---|---|
+| `X-Connectix-Timestamp` | Unix time (seconds) of the delivery |
+| `X-Connectix-Signature` | `v1=` + hex HMAC-SHA256 of `"<timestamp>.<raw body>"` keyed with the secret |
+
+Verify before you parse the JSON, on the raw bytes of the body:
+
+```php
+$timestamp = $_SERVER['HTTP_X_CONNECTIX_TIMESTAMP'] ?? '';
+$signature = $_SERVER['HTTP_X_CONNECTIX_SIGNATURE'] ?? '';
+$body = file_get_contents('php://input');
+
+$expected = 'v1=' . hash_hmac('sha256', $timestamp . '.' . $body, $secret);
+if (!ctype_digit($timestamp) || abs(time() - (int) $timestamp) > 300 || !hash_equals($expected, $signature)) {
+    http_response_code(401);
+    exit;
+}
+```
+
+```js
+const crypto = require('node:crypto');
+const expected = 'v1=' + crypto.createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex');
+const fresh = Math.abs(Date.now() / 1000 - Number(timestamp)) <= 300;
+const valid = fresh && expected.length === signature.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+```
+
+Reject timestamps older than 5 minutes (replay window). Deliveries to a per-message `callbackUrl`/`inboundUrl` have no secret and are **not signed**: keep those URLs hard to guess and validate the `id` against your own records.
+
+#### Retries
+
+Answer any `2xx` within the timeout (5 s, 10 s for tracking events) and do the work afterwards. A non-2xx answer (429 included) or a timeout is retried for that URL with growing delays: 30 s, 1 min, 2, 5, 10, 15, 30 min, 1, 2, 4, 8 and 16 hours. That is 12 more attempts over about 32 hours; after the last one the event is dropped for that URL and the hook stays active. Redirects are not followed. Each attempt is recorded and visible in the console under API usage.
+
+If you missed an event anyway, `GET /messages/{id}` and `GET /messages` read the current state of your messages back.
+
 #### Receiving hooks safely
 
-- Hooks are **unsigned** JSON POSTs today. Do not trust a payload by itself: look the `id` up in your own records (the message you sent, the hook you registered) before acting on it. A signature header is on the roadmap.
-- Answer `2xx` within a few seconds and do the work asynchronously. A non-2xx answer or a timeout (5 s, 10 s for tracking hooks) is logged and **not retried**: if a delivery is missed, reconcile through the API (`checkBlacklist`, `listTemplates`, your own message records).
-- Expect duplicates and out-of-order delivery; make handlers idempotent on `id` + `status`.
-- Use HTTPS URLs with a valid certificate; `http://` is accepted but not recommended.
+- Verify the signature on integration hooks; validate the `id` against your own records on per-message URLs.
+- Deduplicate by `eventId` (or by `id` + `status` for `callback` events) and do not rely on the order of events.
+- Use HTTPS URLs with a valid certificate; `http://` is accepted but not recommended. The URL must be publicly reachable: hosts that resolve to private, loopback, link-local or cloud-metadata addresses are refused with 422 when you register them.
 - In the sandbox the statuses are simulated, so test all transitions there before going live.
 
 ### Errors
@@ -366,6 +419,7 @@ Send `Accept: application/json` on every request; without it some errors are ren
 | 403 | The resource is restricted for this application, or a TrustCheck rule blocks it (`access_restricted`, `trustcheck_no_tracking`, `trustcheck_low_volume`); for OTP: maximum verification attempts exceeded | Contact support, or for TrustCheck enable automatic tracking / reach the daily volume |
 | 404 | Integration, hook or OTP not found | Check the identifier and that it belongs to this application |
 | 406 | Traffic for this company is banned, or there is no sender configured for the recipient's country | Contact support |
+| 409 | A request with the same `Idempotency-Key` is still running (`{"message": "in_progress", "retry_after": 2}`) | Wait `Retry-After` seconds and repeat the same request; you get the stored answer |
 | 410 | The OTP has expired or was already used | Send a new OTP |
 | 422 | Validation failed; the body maps field paths to messages | Fix the listed fields |
 | 429 | OTP rate limit for this phone number | Wait before sending another OTP to the same number |
@@ -391,8 +445,10 @@ Common causes:
 
 #### Retrying
 
-- Retry 5xx and network errors with exponential back-off; message sends are not idempotent, so keep your own record of what was accepted (the `id` in the 200 response) before retrying.
-- Never retry 4xx without changing the request, except 429 after the wait.
+- Send every message and OTP with an `Idempotency-Key` header (a fresh UUID per logical send). Then a timeout or a 5xx can simply be retried with the same key: the API answers with the stored result (`Idempotent-Replayed: true`) if the first attempt went through, and sends normally if it did not.
+- Without a key, retry only network errors that happened before the request was sent, and reconcile through `GET /messages` (filter by `reference`) before sending again.
+- Retry 5xx with exponential back-off. Never retry 4xx without changing the request, except 429 after the wait and 409 after `Retry-After`.
+- A 422 with `[idempotencyKey]` means the key was reused with a different request: use a new key.
 
 ### Build with AI
 
@@ -602,6 +658,8 @@ Phone numbers must be in E.164 format. Authenticate with the application token i
 
 **402** means the account balance cannot cover the message price (`Insufficient funds.`) - top up the account before retrying. **451** means the company has not signed the contract for the channel the template uses (`There is no signed contract for channel "viber"`) - a human must sign it in the console; retrying does not help.
 
+Send an `Idempotency-Key` header (a fresh UUID per logical send) so a network timeout can be retried without a second message; the repeat returns the stored answer with `Idempotent-Replayed: true`.
+
 ##### Authentication
 
 Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
@@ -615,6 +673,7 @@ Sandbox host accepts the same payload and delivers nothing: delivery is simulate
 | Name | In | Required | Type | Description |
 |---|---|---|---|---|
 | `integration` | query | no | string | Integration token obtained from `registerIntegration`. When present, the message is attributed to that integration and its active `callback`/`inbound` hooks receive the status and reply webhooks - but only when the body has no `callbackUrl`/`inboundUrl`: a per-message URL always wins and the integration hooks are then not called. |
+| `Idempotency-Key` | header | no | string | Makes a retry of this request safe. The first request with a key runs normally and its 2xx answer is stored for 24 hours; every repeat of the same key from the same application on the same host returns that stored answer unchanged, with `Idempotent-Replayed: true`, and nothing is sent again. A repeat with a different body, path or host answers **422**; a repeat while the first request is still running answers **409** `in_progress` (retry after `retry_after` seconds). Non-2xx answers are not stored, so the same key can be retried after the request is fixed. Use a fresh UUID per logical send. |
 
 ##### Request body
 
@@ -626,14 +685,15 @@ Content type: `application/json`. Required.
 | `template` | string (uuid) | yes | UUID of an **approved** template from `listTemplates`. The template decides the channel and the message type. |
 | `parameters` | object | no | Values for the `{{ placeholder }}` variables used in the template text, button label and button URL. |
 | `ttl` | integer | no | Seconds the provider may keep trying to deliver the message. Defaults to 7200 for Viber/Noti and 43200 for SMS. In a fallback flow the TTL of a step bounds how long the next step waits. |
-| `callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. |
-| `inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. |
+| `callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. Must be publicly reachable: hosts that resolve to private, loopback, link-local or metadata addresses are refused with 422 (`The URL must be a public http(s) address.`). |
+| `inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. Must be publicly reachable: hosts that resolve to private, loopback, link-local or metadata addresses are refused with 422 (`The URL must be a public http(s) address.`). |
 | `contact` | object (Contact) | no | Optional contact record that is created or updated in the address book when the message is accepted. `firstName` and `lastName` are also injected into the template parameters as `first_name`/`last_name`. |
 | `contact.firstName` | string | yes | Given name. Required when `contact` is present. |
 | `contact.lastName` | string | no | Family name. |
 | `contact.groups` | array of string | no | Contact group names the contact is added to. |
 | `contact.addGroupIfMissing` | boolean | no | Create groups from `groups` that do not exist yet. |
 | `contact.parameters` | object | no | Free-form custom fields stored on the contact. |
+| `reference` | string | no | Your own reference for this message (an order id, an event id...). Echoed as `reference` in the answer and in every `callback`/`inbound` webhook of the message, so you can match them without keeping a mapping table. Free to repeat across messages; use the `Idempotency-Key` header, not the reference, to make a retry safe. |
 
 Example:
 
@@ -670,7 +730,8 @@ Example:
 | 402 | Insufficient funds: the balance does not cover the price of the message. Top up the account before retrying. Returns object (Error). |
 | 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
 | 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
-| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 409 | The same `Idempotency-Key` is still being processed by another request. Returns object (InProgressError). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Also answered when an `Idempotency-Key` is reused with a different request (`[idempotencyKey]`). Returns object (Error). |
 | 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
 | 451 | The company has not signed the contract for the channel of the template. A human must sign it in the console (Documents); retrying does not help. Returns object (Error). |
 | 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
@@ -699,6 +760,8 @@ Example:
 | `createdAt` | string (date-time) | RFC 3339 timestamp. |
 | `position` | integer | Step position. Present only for messages that belong to a fallback flow. |
 | `fallbackId` | string (uuid) | ID of the fallback flow. Present only for messages that belong to a fallback flow. |
+| `reference` | string, nullable | The `reference` the message was created with, or null. |
+| `updatedAt` | string (date-time) | When the message last changed (status included). Present in `getMessage` and `listMessages` answers only. |
 
 ```json
 {
@@ -719,7 +782,8 @@ Example:
     "ttl": 7200,
     "callbackUrl": "https://shop.example.com/webhooks/connectix/status",
     "inboundUrl": "https://shop.example.com/webhooks/connectix/inbound",
-    "createdAt": "2026-09-20T10:15:30+03:00"
+    "createdAt": "2026-09-20T10:15:30+03:00",
+    "reference": null
 }
 ```
 
@@ -731,6 +795,203 @@ curl -X POST "https://api-sandbox.connectix.bg/messages?integration=npu5K6DCMcsm
   -H "Accept: application/json" \
   -H "Content-Type: application/json" \
   -d '{"phone":"+359881234567","template":"3644d7ac-2a95-4068-863e-6352ed78d667","parameters":{"order_id":"10422"},"callbackUrl":"https://shop.example.com/webhooks/connectix/status","inboundUrl":"https://shop.example.com/webhooks/connectix/inbound","contact":{"firstName":"Ivan","lastName":"Ivanov","groups":["Customers"],"addGroupIfMissing":true,"parameters":{"customerId":"10422"}}}'
+```
+
+#### List messages
+
+`GET /messages`
+
+- Operation: `listMessages`
+- Tags: Messages
+- Product: sms
+- Base URL: https://api-sandbox.connectix.bg
+
+Returns the application's messages created inside a time window, newest first, in pages. Use it to reconcile your records when a `callback` webhook was missed, or to find a message by `reference`.
+
+The window is `[from, to]` on `createdAt`, at most 7 days wide; without `from`/`to` it is the last 24 hours. Pages are cursor-based: repeat the same query with the `next` value from the previous answer until it is `null`. Items are the same shape as the `sendMessage` answer plus `updatedAt`.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Lists the sandbox messages of the application (the ones sent to the sandbox host), with the simulated statuses.
+
+##### Parameters
+
+| Name | In | Required | Type | Description |
+|---|---|---|---|---|
+| `from` | query | no | string | Start of the window (inclusive): an RFC 3339 date-time or a `YYYY-MM-DD` date. Default: 24 hours before `to`. |
+| `to` | query | no | string | End of the window (inclusive): an RFC 3339 date-time or a `YYYY-MM-DD` date. Default: now. |
+| `status` | query | no | object (MessageStatus), one of: pending, received, scheduled, processing, sent, delivered, seen, undelivered, failed, could_not_be_sent, not_used | Only messages currently in this status. |
+| `channel` | query | no | object (Channel), one of: sms, viber, noti | Only messages sent through this channel. |
+| `reference` | query | no | string | Only messages created with exactly this `reference`. |
+| `limit` | query | no | integer | Page size. |
+| `cursor` | query | no | string | The `next` value of the previous page. The other query parameters must stay the same. |
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | A page of messages. Returns object (MessagePage). |
+| 400 | A query parameter is invalid: unknown status or channel, a window wider than 7 days, `from` after `to`, a bad date, limit outside 1-100, or a cursor that was not issued by this endpoint. The body is the reason as a string. Returns object (ErrorMessage). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `items` | array of object (Message) |  |
+| `items[].id` | string (uuid) | Message ID. The same value is sent as `id` in the `callback` and `inbound` webhooks. |
+| `items[].type` | object (MessageType), one of: transactional, promotional | Message type; it follows the template/service configuration. Promotional messages always respect the blacklist. |
+| `items[].phone` | string | Recipient in E.164 format. |
+| `items[].message` | object (MessageContent) | Rendered content that was sent. |
+| `items[].message.text` | string, nullable | Rendered message text. |
+| `items[].message.imageUrl` | string (uri) | Image URL (Viber image/advanced layouts only). |
+| `items[].message.button` | object (MessageButton) |  |
+| `items[].price` | string | Price charged for the message as a decimal string with four decimals, in the account currency (EUR). Always `0.0000` on the sandbox. |
+| `items[].parts` | integer | Number of SMS parts (1 for Viber/Noti). |
+| `items[].channel` | object (Channel), one of: sms, viber, noti | Messaging channel. `noti` is the Connectix in-app notification channel. |
+| `items[].status` | object (MessageStatus), one of: pending, received, scheduled, processing, sent, delivered, seen, undelivered, failed, could_not_be_sent, not_used | Lifecycle: `received` (accepted by the API) -> `processing` -> `sent` -> `delivered` -> `seen` (Viber/Noti only). Terminal failures: `undelivered` (expired, not a Viber/Noti user, opted out), `failed`, `could_not_be_sent`. `scheduled` means the queue was unavailable and the message will be picked up by the scheduler. |
+| `items[].ttl` | integer, nullable | Effective delivery TTL in seconds. |
+| `items[].callbackUrl` | string, nullable | Status webhook URL attached to this message. |
+| `items[].inboundUrl` | string, nullable | Reply webhook URL. Present for Viber messages only. |
+| `items[].sender` | string, nullable | Sender ID used. Present for SMS messages only. |
+| `items[].createdAt` | string (date-time) | RFC 3339 timestamp. |
+| `items[].position` | integer | Step position. Present only for messages that belong to a fallback flow. |
+| `items[].fallbackId` | string (uuid) | ID of the fallback flow. Present only for messages that belong to a fallback flow. |
+| `items[].reference` | string, nullable | The `reference` the message was created with, or null. |
+| `items[].updatedAt` | string (date-time) | When the message last changed (status included). Present in `getMessage` and `listMessages` answers only. |
+| `next` | string, nullable | Opaque cursor of the next page; pass it as `cursor` with the same filters. `null` on the last page. |
+
+```json
+{
+    "items": [
+        {
+            "id": "8b2f1c0e-5d3a-4e7b-9f21-0c6a7d4e5b12",
+            "type": "transactional",
+            "phone": "+359881234567",
+            "message": {
+                "text": "Your order 1234 was shipped."
+            },
+            "price": "0.0000",
+            "parts": 1,
+            "channel": "viber",
+            "status": "delivered",
+            "ttl": 7200,
+            "callbackUrl": null,
+            "reference": "order-1234-shipped",
+            "createdAt": "2026-09-22T10:15:30+03:00",
+            "inboundUrl": null,
+            "updatedAt": "2026-09-22T10:15:41+03:00"
+        }
+    ],
+    "next": null
+}
+```
+
+##### Example request
+
+```bash
+curl -X GET "https://api-sandbox.connectix.bg/messages?limit=50" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json"
+```
+
+#### Get a message
+
+`GET /messages/{id}`
+
+- Operation: `getMessage`
+- Tags: Messages
+- Product: sms
+- Base URL: https://api-sandbox.connectix.bg
+
+Returns one message of the application by its `id` (the UUID from the `sendMessage` answer and from the webhooks) with its current status. The reliable way to catch up after a missed `callback` webhook.
+
+Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
+
+##### Authentication
+
+Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
+
+##### Sandbox
+
+Reads a sandbox message of the application.
+
+##### Parameters
+
+| Name | In | Required | Type | Description |
+|---|---|---|---|---|
+| `id` | path | yes | string (uuid) | Message ID. |
+
+##### Responses
+
+| Status | Description |
+|---|---|
+| 200 | The message. Returns object (Message). |
+| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
+| 404 | No message with this id belongs to the application. Returns object (ErrorMessage). |
+| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
+
+###### 200 response
+
+| Property | Type | Description |
+|---|---|---|
+| `id` | string (uuid) | Message ID. The same value is sent as `id` in the `callback` and `inbound` webhooks. |
+| `type` | object (MessageType), one of: transactional, promotional | Message type; it follows the template/service configuration. Promotional messages always respect the blacklist. |
+| `phone` | string | Recipient in E.164 format. |
+| `message` | object (MessageContent) | Rendered content that was sent. |
+| `message.text` | string, nullable | Rendered message text. |
+| `message.imageUrl` | string (uri) | Image URL (Viber image/advanced layouts only). |
+| `message.button` | object (MessageButton) |  |
+| `message.button.label` | string |  |
+| `message.button.url` | string (uri) |  |
+| `price` | string | Price charged for the message as a decimal string with four decimals, in the account currency (EUR). Always `0.0000` on the sandbox. |
+| `parts` | integer | Number of SMS parts (1 for Viber/Noti). |
+| `channel` | object (Channel), one of: sms, viber, noti | Messaging channel. `noti` is the Connectix in-app notification channel. |
+| `status` | object (MessageStatus), one of: pending, received, scheduled, processing, sent, delivered, seen, undelivered, failed, could_not_be_sent, not_used | Lifecycle: `received` (accepted by the API) -> `processing` -> `sent` -> `delivered` -> `seen` (Viber/Noti only). Terminal failures: `undelivered` (expired, not a Viber/Noti user, opted out), `failed`, `could_not_be_sent`. `scheduled` means the queue was unavailable and the message will be picked up by the scheduler. |
+| `ttl` | integer, nullable | Effective delivery TTL in seconds. |
+| `callbackUrl` | string, nullable | Status webhook URL attached to this message. |
+| `inboundUrl` | string, nullable | Reply webhook URL. Present for Viber messages only. |
+| `sender` | string, nullable | Sender ID used. Present for SMS messages only. |
+| `createdAt` | string (date-time) | RFC 3339 timestamp. |
+| `position` | integer | Step position. Present only for messages that belong to a fallback flow. |
+| `fallbackId` | string (uuid) | ID of the fallback flow. Present only for messages that belong to a fallback flow. |
+| `reference` | string, nullable | The `reference` the message was created with, or null. |
+| `updatedAt` | string (date-time) | When the message last changed (status included). Present in `getMessage` and `listMessages` answers only. |
+
+```json
+{
+    "id": "8b2f1c0e-5d3a-4e7b-9f21-0c6a7d4e5b12",
+    "type": "transactional",
+    "phone": "+359881234567",
+    "message": {
+        "text": "Your order 1234 was shipped."
+    },
+    "price": "0.0000",
+    "parts": 1,
+    "channel": "viber",
+    "status": "delivered",
+    "ttl": 7200,
+    "callbackUrl": null,
+    "reference": "order-1234-shipped",
+    "createdAt": "2026-09-22T10:15:30+03:00",
+    "inboundUrl": null,
+    "updatedAt": "2026-09-22T10:15:41+03:00"
+}
+```
+
+##### Example request
+
+```bash
+curl -X GET "https://api-sandbox.connectix.bg/messages/3644d7ac-2a95-4068-863e-6352ed78d667" \
+  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
+  -H "Accept: application/json"
 ```
 
 #### Send a message with fallback steps
@@ -748,6 +1009,8 @@ Phone numbers must be in E.164 format. Authenticate with the application token i
 
 **402** means the account balance cannot cover the message price (`Insufficient funds.`) - top up the account before retrying. **451** means the company has not signed the contract for the channel the template uses (`There is no signed contract for channel "viber"`) - a human must sign it in the console; retrying does not help.
 
+Send an `Idempotency-Key` header (a fresh UUID per logical send) so a network timeout can be retried without a second message; the repeat returns the stored answer with `Idempotent-Replayed: true`.
+
 ##### Authentication
 
 Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
@@ -761,6 +1024,7 @@ Sandbox host accepts the same payload and delivers nothing: delivery is simulate
 | Name | In | Required | Type | Description |
 |---|---|---|---|---|
 | `integration` | query | no | string | Integration token obtained from `registerIntegration`. When present, the message is attributed to that integration and its active `callback`/`inbound` hooks receive the status and reply webhooks - but only when the body has no `callbackUrl`/`inboundUrl`: a per-message URL always wins and the integration hooks are then not called. |
+| `Idempotency-Key` | header | no | string | Makes a retry of this request safe. The first request with a key runs normally and its 2xx answer is stored for 24 hours; every repeat of the same key from the same application on the same host returns that stored answer unchanged, with `Idempotent-Replayed: true`, and nothing is sent again. A repeat with a different body, path or host answers **422**; a repeat while the first request is still running answers **409** `in_progress` (retry after `retry_after` seconds). Non-2xx answers are not stored, so the same key can be retried after the request is fixed. Use a fresh UUID per logical send. |
 
 ##### Request body
 
@@ -780,8 +1044,9 @@ Content type: `application/json`. Required.
 | `flow[].position` | integer | yes | Order of the step, starting at 1. |
 | `flow[].parameters` | object | no | Template parameters for this step. |
 | `flow[].ttl` | integer | no | Seconds the provider may keep trying to deliver the message. Defaults to 7200 for Viber/Noti and 43200 for SMS. In a fallback flow the TTL of a step bounds how long the next step waits. |
-| `flow[].callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. |
-| `flow[].inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. |
+| `flow[].callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. Must be publicly reachable (see `sendMessage`). |
+| `flow[].inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. Must be publicly reachable (see `sendMessage`). |
+| `reference` | string | no | Your own reference for the whole flow. Every step message answers and calls back with it. |
 
 Example:
 
@@ -818,7 +1083,8 @@ Example:
 | 402 | Insufficient funds: the balance does not cover the price of the message. Top up the account before retrying. Returns object (Error). |
 | 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
 | 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
-| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 409 | The same `Idempotency-Key` is still being processed by another request. Returns object (InProgressError). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Also answered when an `Idempotency-Key` is reused with a different request (`[idempotencyKey]`). Returns object (Error). |
 | 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
 | 451 | The company has not signed the contract for the channel of the template. A human must sign it in the console (Documents); retrying does not help. Returns object (Error). |
 | 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
@@ -847,6 +1113,8 @@ Example:
 | `flow[].createdAt` | string (date-time) | RFC 3339 timestamp. |
 | `flow[].position` | integer | Step position. Present only for messages that belong to a fallback flow. |
 | `flow[].fallbackId` | string (uuid) | ID of the fallback flow. Present only for messages that belong to a fallback flow. |
+| `flow[].reference` | string, nullable | The `reference` the message was created with, or null. |
+| `flow[].updatedAt` | string (date-time) | When the message last changed (status included). Present in `getMessage` and `listMessages` answers only. |
 | `createdAt` | string (date-time) |  |
 
 ```json
@@ -873,7 +1141,8 @@ Example:
             "inboundUrl": "https://shop.example.com/webhooks/connectix/inbound",
             "createdAt": "2026-09-20T10:15:30+03:00",
             "position": 1,
-            "fallbackId": "a1c3e5f7-9b2d-4f6e-8a0c-1d3e5f7a9b2c"
+            "fallbackId": "a1c3e5f7-9b2d-4f6e-8a0c-1d3e5f7a9b2c",
+            "reference": null
         }
     ],
     "createdAt": "2026-09-20T10:15:30+03:00"
@@ -905,6 +1174,8 @@ Phone numbers must be in E.164 format. Authenticate with the application token i
 
 **402** means the account balance cannot cover the message price (`Insufficient funds.`) - top up the account before retrying. **451** means the company has not signed the contract for the channel the template uses (`There is no signed contract for channel "viber"`) - a human must sign it in the console; retrying does not help.
 
+Send an `Idempotency-Key` header (a fresh UUID per logical send) so a network timeout can be retried without a second message; the repeat returns the stored answer with `Idempotent-Replayed: true`.
+
 ##### Authentication
 
 Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
@@ -918,6 +1189,7 @@ Not implemented on the sandbox host: it answers 404 `{"error": "not_available_on
 | Name | In | Required | Type | Description |
 |---|---|---|---|---|
 | `integration` | query | no | string | Integration token obtained from `registerIntegration`. When present, the message is attributed to that integration and its active `callback`/`inbound` hooks receive the status and reply webhooks - but only when the body has no `callbackUrl`/`inboundUrl`: a per-message URL always wins and the integration hooks are then not called. |
+| `Idempotency-Key` | header | no | string | Makes a retry of this request safe. The first request with a key runs normally and its 2xx answer is stored for 24 hours; every repeat of the same key from the same application on the same host returns that stored answer unchanged, with `Idempotent-Replayed: true`, and nothing is sent again. A repeat with a different body, path or host answers **422**; a repeat while the first request is still running answers **409** `in_progress` (retry after `retry_after` seconds). Non-2xx answers are not stored, so the same key can be retried after the request is fixed. Use a fresh UUID per logical send. |
 
 ##### Request body
 
@@ -926,18 +1198,19 @@ Content type: `application/json`. Required.
 | Property | Type | Required | Description |
 |---|---|---|---|
 | `phone` | string | yes | Recipient mobile number. Send it in E.164 format (`+359881234567`). National formats are parsed against the countries enabled for the application, but E.164 is the only format that is guaranteed to work. Landline numbers are rejected with 422. |
-| `fileUrl` | string (uri) | yes | Public HTTPS URL of the document. |
+| `fileUrl` | string (uri) | yes | Public HTTPS URL of the document. Must be publicly reachable: hosts that resolve to private, loopback, link-local or metadata addresses are refused with 422 (`The URL must be a public http(s) address.`). |
 | `fileType` | string, one of: doc, docx, rtf, dot, dotx, odt, odf, fodt, txt, info, pdf, xps, pdax, eps, xls, xlsx, ods, fods, csv, xlsm, xltx | yes | File extension of the document. |
 | `fileName` | string | yes | File name shown to the recipient. |
 | `ttl` | integer | no | Seconds the provider may keep trying to deliver the message. Defaults to 7200 for Viber/Noti and 43200 for SMS. In a fallback flow the TTL of a step bounds how long the next step waits. |
-| `callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. |
-| `inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. |
+| `callbackUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `callback` (delivery status) webhook for this message. Must be publicly reachable: hosts that resolve to private, loopback, link-local or metadata addresses are refused with 422 (`The URL must be a public http(s) address.`). |
+| `inboundUrl` | string (uri) | no | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the `inbound` (reply) webhook for this message. Only Viber and Noti recipients can reply. Must be publicly reachable: hosts that resolve to private, loopback, link-local or metadata addresses are refused with 422 (`The URL must be a public http(s) address.`). |
 | `contact` | object (Contact) | no | Optional contact record that is created or updated in the address book when the message is accepted. `firstName` and `lastName` are also injected into the template parameters as `first_name`/`last_name`. |
 | `contact.firstName` | string | yes | Given name. Required when `contact` is present. |
 | `contact.lastName` | string | no | Family name. |
 | `contact.groups` | array of string | no | Contact group names the contact is added to. |
 | `contact.addGroupIfMissing` | boolean | no | Create groups from `groups` that do not exist yet. |
 | `contact.parameters` | object | no | Free-form custom fields stored on the contact. |
+| `reference` | string | no | Your own reference for this message (an order id, an event id...). Echoed as `reference` in the answer and in every `callback`/`inbound` webhook of the message, so you can match them without keeping a mapping table. Free to repeat across messages; use the `Idempotency-Key` header, not the reference, to make a retry safe. |
 
 Example:
 
@@ -962,8 +1235,9 @@ Example:
 | 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
 | 404 | Sandbox host only: media messages have no sandbox implementation. Nothing was sent or charged; use `sendMessage` to exercise the sandbox. Returns object (ErrorObject). |
 | 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
+| 409 | The same `Idempotency-Key` is still being processed by another request. Returns object (InProgressError). |
 | 415 | The body is not `application/json`. Multipart uploads are not supported; reference the file by URL. Returns object (Error). |
-| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Also answered when an `Idempotency-Key` is reused with a different request (`[idempotencyKey]`). Returns object (Error). |
 | 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
 | 451 | The company has not signed the contract for the channel of the template. A human must sign it in the console (Documents); retrying does not help. Returns object (Error). |
 | 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
@@ -992,6 +1266,8 @@ Example:
 | `createdAt` | string (date-time) | RFC 3339 timestamp. |
 | `position` | integer | Step position. Present only for messages that belong to a fallback flow. |
 | `fallbackId` | string (uuid) | ID of the fallback flow. Present only for messages that belong to a fallback flow. |
+| `reference` | string, nullable | The `reference` the message was created with, or null. |
+| `updatedAt` | string (date-time) | When the message last changed (status included). Present in `getMessage` and `listMessages` answers only. |
 
 ```json
 {
@@ -1008,7 +1284,8 @@ Example:
     "ttl": 7200,
     "callbackUrl": "https://shop.example.com/webhooks/connectix/status",
     "inboundUrl": "https://shop.example.com/webhooks/connectix/inbound",
-    "createdAt": "2026-09-20T10:15:30+03:00"
+    "createdAt": "2026-09-20T10:15:30+03:00",
+    "reference": null
 }
 ```
 
@@ -1041,6 +1318,8 @@ Phone numbers must be in E.164 format. Authenticate with the application token i
 
 **402** means the account balance cannot cover the message price (`Insufficient funds.`) - top up the account before retrying.
 
+Send an `Idempotency-Key` header (a fresh UUID per logical send) so a network timeout can be retried without a second message; the repeat returns the stored answer with `Idempotent-Replayed: true`.
+
 ##### Authentication
 
 Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
@@ -1048,6 +1327,12 @@ Send the token in the `Authorization` header. Application token sent as the raw 
 ##### Sandbox
 
 Sandbox host issues a real OTP record but sends no SMS; the response additionally contains `code` so the verify flow can be exercised end to end. The balance check is skipped (OTP has no contract check on either host). An unparsable phone returns 422 instead of 502.
+
+##### Parameters
+
+| Name | In | Required | Type | Description |
+|---|---|---|---|---|
+| `Idempotency-Key` | header | no | string | Makes a retry of this request safe. The first request with a key runs normally and its 2xx answer is stored for 24 hours; every repeat of the same key from the same application on the same host returns that stored answer unchanged, with `Idempotent-Replayed: true`, and nothing is sent again. A repeat with a different body, path or host answers **422**; a repeat while the first request is still running answers **409** `in_progress` (retry after `retry_after` seconds). Non-2xx answers are not stored, so the same key can be retried after the request is fixed. Use a fresh UUID per logical send. |
 
 ##### Request body
 
@@ -1061,7 +1346,8 @@ Content type: `application/json`. Required.
 | `codeLength` | integer | no | Number of digits. Default 6. |
 | `maxAttempts` | integer | no | Verification attempts allowed before the OTP is locked. Default 3. |
 | `purpose` | string | no | Free-text label stored with the OTP (e.g. `login`, `checkout`). |
-| `callbackUrl` | string (uri) | no | URL that receives the `callback` webhook for the SMS carrying the code. |
+| `callbackUrl` | string (uri) | no | URL that receives the `callback` webhook for the SMS carrying the code. Must be publicly reachable: hosts that resolve to private, loopback, link-local or metadata addresses are refused with 422 (`The URL must be a public http(s) address.`). |
+| `reference` | string | no | Your own reference for this OTP. Echoed as `reference` in the `callback` webhooks of the OTP message (and of a resend). |
 
 Example:
 
@@ -1085,7 +1371,8 @@ Example:
 | 402 | Insufficient funds: the balance does not cover the price of the message. Top up the account before retrying. Returns object (Error). |
 | 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
 | 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
-| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 409 | The same `Idempotency-Key` is still being processed by another request. Returns object (InProgressError). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Also answered when an `Idempotency-Key` is reused with a different request (`[idempotencyKey]`). Returns object (Error). |
 | 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
 | 500 | Unexpected server error while processing the OTP. Safe to retry once. Returns object (Error). |
 | 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
@@ -1167,7 +1454,7 @@ Example:
 | 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
 | 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
 | 410 | The OTP has already expired or has already been used. Issue a new one with `sendOtp`. Returns object (Error). |
-| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Also answered when an `Idempotency-Key` is reused with a different request (`[idempotencyKey]`). Returns object (Error). |
 | 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
 | 500 | Unexpected server error while processing the OTP. Safe to retry once. Returns object (Error). |
 
@@ -1246,7 +1533,7 @@ Example:
 | 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
 | 406 | Traffic is suspended for the company, or no sender ID is configured for the recipient's country. Returns object (Error). |
 | 410 | The OTP has already expired or has already been used. Issue a new one with `sendOtp`. Returns object (Error). |
-| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Also answered when an `Idempotency-Key` is reused with a different request (`[idempotencyKey]`). Returns object (Error). |
 | 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
 | 500 | Unexpected server error while processing the OTP. Safe to retry once. Returns object (Error). |
 | 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
@@ -1454,7 +1741,7 @@ Content type: `application/json`. Required.
 |---|---|---|---|
 | `token` | string | yes | Integration token returned by `registerIntegration`. |
 | `type` | object (HookType), one of: callback, inbound, template, tracking, blacklist | yes | `callback` = message delivery status, `inbound` = reply from a recipient, `template` = a template was created or changed, `tracking` = shipment tracking event, `blacklist` = a blacklist entry changed. See the webhook definitions for the payloads. |
-| `url` | string (uri) | yes | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the webhook POST. |
+| `url` | string (uri) | yes | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the webhook POST. Must be publicly reachable: hosts that resolve to private, loopback, link-local or metadata addresses are refused with 422 (`The URL must be a public http(s) address.`). |
 
 Example:
 
@@ -1935,145 +2222,9 @@ curl -X POST "https://api-sandbox.connectix.bg/shipments?integration=npu5K6DCMcs
   -d '{"trackingNumber":"1053912345678","phone":"+359881234567"}'
 ```
 
-#### Register a shipment for tracking (deprecated alias)
-
-`POST /trackings`
-
-- Operation: `createTracking`
-- Tags: Tracking
-- Product: tracking
-- Base URL: https://api-sandbox.connectix.bg
-- Deprecated: yes (sunset 2027-03-31)
-
-> **Deprecated.** This operation will be removed on 2027-03-31. Prefer the replacement named in the description.
-
-Deprecated alias of `createShipment` (`POST /shipments`) with the same parameters, body and answer. Do not use it in new integrations; it is scheduled for removal on 2027-03-31.
-
-Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
-
-##### Authentication
-
-Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
-
-##### Sandbox
-
-Same route on both hosts. With the sandbox token it operates on the application's real data (nothing is mocked).
-
-##### Parameters
-
-| Name | In | Required | Type | Description |
-|---|---|---|---|---|
-| `integration` | query | yes | string | Integration token obtained from `registerIntegration`. The shipment is attributed to that integration and its `tracking` hooks receive the events. (A deprecated `token` body field is still accepted instead.) |
-
-##### Request body
-
-Content type: `application/json`. Required.
-
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `trackingNumber` | string | yes | Courier tracking number. The courier (Econt, Speedy, Evropat, Sameday, BoxNow) is detected from its format. |
-| `phone` | string | no | Recipient phone in E.164 format. Used to link the shipment to a contact and to TrustCheck; an unparsable value is ignored. |
-| `token` | string | no | Deprecated: integration token in the body. Use the `integration` query parameter instead. |
-
-Example:
-
-```json
-{
-    "trackingNumber": "1053912345678",
-    "phone": "+359881234567"
-}
-```
-
-##### Responses
-
-| Status | Description |
-|---|---|
-| 200 | Shipment registered (or already known). Returns object (OkAnswer), one of: ok. |
-| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
-| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
-| 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
-| 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
-| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
-| 502 | The request could not be processed: the phone number could not be parsed, the recipient's country is not enabled for the application, no provider is available, or a storage error occurred. Returns object (Error). |
-
-###### 200 response
-
-```json
-"ok"
-```
-
-##### Example request
-
-```bash
-curl -X POST "https://api-sandbox.connectix.bg/trackings?integration=npu5K6DCMcsmLyDjLNpSkc8szq8iUSlY6Ga96vJjxsKOYWiAILbvQp9qXkKKGIfl" \
-  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
-  -H "Accept: application/json" \
-  -H "Content-Type: application/json" \
-  -d '{"trackingNumber":"1053912345678","phone":"+359881234567"}'
-```
-
 ### Account
 
 Information about the authenticated application and reference data.
-
-#### List public holidays
-
-`GET /countries/holidays`
-
-- Operation: `listHolidays`
-- Tags: Account
-- Product: account
-- Base URL: https://api-sandbox.connectix.bg
-
-Returns the non-working days of the current year for a country as `YYYY-MM-DD` dates - the same calendar Connectix uses to count working days for couriers and campaign scheduling. Only Bulgaria (`bg`) is supported; any other value returns 400.
-
-Authenticate with the application token in the `Authorization` header: on `https://api-sandbox.connectix.bg` use the application's **sandbox token**; the production host uses the production token of the same application.
-
-##### Authentication
-
-Send the token in the `Authorization` header. Application token sent as the raw value of the `Authorization` header (`Authorization: <token>`); `Bearer <token>` is also accepted. Use the sandbox token on `https://api-sandbox.connectix.bg`. Use the sandbox token from the console; the raw token and `Bearer <token>` are both accepted.
-
-##### Parameters
-
-| Name | In | Required | Type | Description |
-|---|---|---|---|---|
-| `country` | query | yes | string, one of: bg | ISO 3166-1 alpha-2 country code, case-insensitive. Only `bg` is supported. |
-
-##### Responses
-
-| Status | Description |
-|---|---|
-| 200 | Sorted list of dates. Returns array of string (date). |
-| 400 | Invalid request. Either a required value is missing, the template is not approved / not found, the text exceeds the channel limit, or the body is not valid JSON (`{"error": "Invalid JSON: Syntax error"}`). Returns object (Error). |
-| 401 | Missing or unknown token for this host, or the company is suspended. Check that you use the sandbox token on the sandbox host. Returns object (Error). |
-| 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
-
-###### 200 response
-
-```json
-[
-    "2026-01-01",
-    "2026-03-03",
-    "2026-04-10",
-    "2026-04-13",
-    "2026-05-01",
-    "2026-05-06",
-    "2026-05-25",
-    "2026-09-07",
-    "2026-09-22",
-    "2026-12-24",
-    "2026-12-25",
-    "2026-12-28"
-]
-```
-
-##### Example request
-
-```bash
-curl -X GET "https://api-sandbox.connectix.bg/countries/holidays?country=bg" \
-  -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
-  -H "Accept: application/json"
-```
 
 #### Identify the application behind the token
 
@@ -2128,7 +2279,11 @@ Webhooks are JSON POST requests from Connectix to the URL registered with `regis
 
 Posted each time the delivery status changes: to the message's own `callbackUrl` when it has one, otherwise to every active `callback` hook of the integration the message was sent with. Messages sent from campaigns never trigger it.
 
-Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`, from the public address range of Connectix. Every event carries `eventId` in the body and as the `X-Connectix-Event-Id` header.
+
+**Signature.** Deliveries to an integration hook are signed with the integration `secret` (the one you chose at `registerIntegration`): `X-Connectix-Timestamp` is the Unix time of the delivery and `X-Connectix-Signature` is `v1=` followed by the hex HMAC-SHA256 of `"<timestamp>.<raw request body>"` keyed with the secret. Verify with a constant-time comparison and reject timestamps older than 5 minutes. Deliveries to a per-message `callbackUrl`/`inboundUrl` have no secret and are not signed - validate the `id` against your own records instead.
+
+**Acknowledging and retries.** Answer any 2xx within the timeout (5 s, 10 s for tracking events) and do the work afterwards. A non-2xx answer (429 included) or a timeout is retried per URL with growing delays: 30 s, 1 min, 2, 5, 10, 15, 30 min, 1, 2, 4, 8 and 16 hours - 12 more attempts over about 32 hours, after which the event is dropped for that URL (the hook stays active). Redirects are not followed. Delivery is at-least-once and the order of events is not guaranteed: deduplicate on `eventId` (or on `id` + `status` for the `callback` event) and order by the event's own timestamp.
 
 | Property | Type | Required | Description |
 |---|---|---|---|
@@ -2137,13 +2292,17 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
 | `channel` | object (Channel), one of: sms, viber, noti | yes | Messaging channel. `noti` is the Connectix in-app notification channel. |
 | `createdAt` | string (date-time) | yes | When the status was recorded. |
 | `fallbackId` | string (uuid) | no | Present when the message belongs to a fallback flow. |
+| `eventId` | string (uuid) | yes | Globally unique id of this event. The same value is sent as the `X-Connectix-Event-Id` header. A delivery can be repeated (at-least-once): use it to drop duplicates. |
+| `reference` | string | no | The `reference` the message was created with. Present only when one was given. |
 
 ```json
 {
     "id": "8b2f1c0e-5d3a-4e7b-9f21-0c6a7d4e5b12",
     "status": "delivered",
     "channel": "viber",
-    "createdAt": "2026-09-20T10:15:41+03:00"
+    "createdAt": "2026-09-20T10:15:41+03:00",
+    "eventId": "c1f4b7a2-3d5e-4f60-8a9b-1c2d3e4f5a6b",
+    "reference": "order-1234-shipped"
 }
 ```
 
@@ -2151,7 +2310,11 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
 
 Posted when the recipient replies: to the message's own `inboundUrl` when it has one, otherwise to every active `inbound` hook of the integration the message was sent with. Replies equal to the application's stop/resume word also toggle the blacklist automatically.
 
-Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`, from the public address range of Connectix. Every event carries `eventId` in the body and as the `X-Connectix-Event-Id` header.
+
+**Signature.** Deliveries to an integration hook are signed with the integration `secret` (the one you chose at `registerIntegration`): `X-Connectix-Timestamp` is the Unix time of the delivery and `X-Connectix-Signature` is `v1=` followed by the hex HMAC-SHA256 of `"<timestamp>.<raw request body>"` keyed with the secret. Verify with a constant-time comparison and reject timestamps older than 5 minutes. Deliveries to a per-message `callbackUrl`/`inboundUrl` have no secret and are not signed - validate the `id` against your own records instead.
+
+**Acknowledging and retries.** Answer any 2xx within the timeout (5 s, 10 s for tracking events) and do the work afterwards. A non-2xx answer (429 included) or a timeout is retried per URL with growing delays: 30 s, 1 min, 2, 5, 10, 15, 30 min, 1, 2, 4, 8 and 16 hours - 12 more attempts over about 32 hours, after which the event is dropped for that URL (the hook stays active). Redirects are not followed. Delivery is at-least-once and the order of events is not guaranteed: deduplicate on `eventId` (or on `id` + `status` for the `callback` event) and order by the event's own timestamp.
 
 | Property | Type | Required | Description |
 |---|---|---|---|
@@ -2162,6 +2325,8 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
 | `mediaUrl` | string, nullable | yes | Download URL of an attached image or file. |
 | `mediaName` | string, nullable | yes |  |
 | `type` | string, one of: text, image, file | no | Kind of reply. Present on production; the sandbox simulator omits it, so do not require it when validating sandbox webhooks. |
+| `eventId` | string (uuid) | yes | Globally unique id of this event. The same value is sent as the `X-Connectix-Event-Id` header. A delivery can be repeated (at-least-once): use it to drop duplicates. |
+| `reference` | string | no | The `reference` the message was created with. Present only when one was given. |
 
 ```json
 {
@@ -2171,7 +2336,8 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
     "text": "Thanks!",
     "mediaUrl": null,
     "mediaName": null,
-    "type": "text"
+    "type": "text",
+    "eventId": "c1f4b7a2-3d5e-4f60-8a9b-1c2d3e4f5a6b"
 }
 ```
 
@@ -2179,7 +2345,11 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
 
 Posted to the `blacklist` hooks of the application (or of every application of the company when the entry is `global`) whenever an entry is created or changed.
 
-Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`, from the public address range of Connectix. Every event carries `eventId` in the body and as the `X-Connectix-Event-Id` header.
+
+**Signature.** Deliveries to an integration hook are signed with the integration `secret` (the one you chose at `registerIntegration`): `X-Connectix-Timestamp` is the Unix time of the delivery and `X-Connectix-Signature` is `v1=` followed by the hex HMAC-SHA256 of `"<timestamp>.<raw request body>"` keyed with the secret. Verify with a constant-time comparison and reject timestamps older than 5 minutes. Deliveries to a per-message `callbackUrl`/`inboundUrl` have no secret and are not signed - validate the `id` against your own records instead.
+
+**Acknowledging and retries.** Answer any 2xx within the timeout (5 s, 10 s for tracking events) and do the work afterwards. A non-2xx answer (429 included) or a timeout is retried per URL with growing delays: 30 s, 1 min, 2, 5, 10, 15, 30 min, 1, 2, 4, 8 and 16 hours - 12 more attempts over about 32 hours, after which the event is dropped for that URL (the hook stays active). Redirects are not followed. Delivery is at-least-once and the order of events is not guaranteed: deduplicate on `eventId` (or on `id` + `status` for the `callback` event) and order by the event's own timestamp.
 
 | Property | Type | Required | Description |
 |---|---|---|---|
@@ -2189,6 +2359,7 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
 | `permanent` | boolean | yes |  |
 | `global` | boolean | yes |  |
 | `expire_at_for_transactional` | string (date-time), nullable | yes |  |
+| `eventId` | string (uuid) | yes | Globally unique id of this event. The same value is sent as the `X-Connectix-Event-Id` header. A delivery can be repeated (at-least-once): use it to drop duplicates. |
 
 ```json
 {
@@ -2197,7 +2368,8 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
     "active": true,
     "permanent": false,
     "global": false,
-    "expire_at_for_transactional": "2026-09-27T10:15:30+03:00"
+    "expire_at_for_transactional": "2026-09-27T10:15:30+03:00",
+    "eventId": "c1f4b7a2-3d5e-4f60-8a9b-1c2d3e4f5a6b"
 }
 ```
 
@@ -2205,7 +2377,11 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
 
 Posted to the `template` hooks of every active integration of the company within a minute after a template is created or changed, so the integration can keep its local template list in sync with `listTemplates`.
 
-Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`, from the public address range of Connectix. Every event carries `eventId` in the body and as the `X-Connectix-Event-Id` header.
+
+**Signature.** Deliveries to an integration hook are signed with the integration `secret` (the one you chose at `registerIntegration`): `X-Connectix-Timestamp` is the Unix time of the delivery and `X-Connectix-Signature` is `v1=` followed by the hex HMAC-SHA256 of `"<timestamp>.<raw request body>"` keyed with the secret. Verify with a constant-time comparison and reject timestamps older than 5 minutes. Deliveries to a per-message `callbackUrl`/`inboundUrl` have no secret and are not signed - validate the `id` against your own records instead.
+
+**Acknowledging and retries.** Answer any 2xx within the timeout (5 s, 10 s for tracking events) and do the work afterwards. A non-2xx answer (429 included) or a timeout is retried per URL with growing delays: 30 s, 1 min, 2, 5, 10, 15, 30 min, 1, 2, 4, 8 and 16 hours - 12 more attempts over about 32 hours, after which the event is dropped for that URL (the hook stays active). Redirects are not followed. Delivery is at-least-once and the order of events is not guaranteed: deduplicate on `eventId` (or on `id` + `status` for the `callback` event) and order by the event's own timestamp.
 
 | Property | Type | Required | Description |
 |---|---|---|---|
@@ -2218,6 +2394,7 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
 | `button_label` | string, nullable | yes |  |
 | `button_url` | string, nullable | yes |  |
 | `status` | string, one of: pending, approved, waiting_information, rejected | yes |  |
+| `eventId` | string (uuid) | yes | Globally unique id of this event. The same value is sent as the `X-Connectix-Event-Id` header. A delivery can be repeated (at-least-once): use it to drop duplicates. |
 
 ```json
 {
@@ -2229,7 +2406,8 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
     "text": "Your order #{{ order_id }} has been shipped.",
     "button_label": "Track order",
     "button_url": "https://shop.example.com/orders/{{ order_id }}",
-    "status": "approved"
+    "status": "approved",
+    "eventId": "c1f4b7a2-3d5e-4f60-8a9b-1c2d3e4f5a6b"
 }
 ```
 
@@ -2237,7 +2415,11 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
 
 Posted to the `tracking` hooks of the application that registered the shipment (`createShipment`) when the courier reports a new state.
 
-Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`. Any 2xx status acknowledges the delivery; other statuses and timeouts (5 s, 10 s for tracking) are logged and **not retried**. Webhooks carry no signature - keep the URL secret or validate the `id` against your own records.
+Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agent: connectix-client`, from the public address range of Connectix. Every event carries `eventId` in the body and as the `X-Connectix-Event-Id` header.
+
+**Signature.** Deliveries to an integration hook are signed with the integration `secret` (the one you chose at `registerIntegration`): `X-Connectix-Timestamp` is the Unix time of the delivery and `X-Connectix-Signature` is `v1=` followed by the hex HMAC-SHA256 of `"<timestamp>.<raw request body>"` keyed with the secret. Verify with a constant-time comparison and reject timestamps older than 5 minutes. Deliveries to a per-message `callbackUrl`/`inboundUrl` have no secret and are not signed - validate the `id` against your own records instead.
+
+**Acknowledging and retries.** Answer any 2xx within the timeout (5 s, 10 s for tracking events) and do the work afterwards. A non-2xx answer (429 included) or a timeout is retried per URL with growing delays: 30 s, 1 min, 2, 5, 10, 15, 30 min, 1, 2, 4, 8 and 16 hours - 12 more attempts over about 32 hours, after which the event is dropped for that URL (the hook stays active). Redirects are not followed. Delivery is at-least-once and the order of events is not guaranteed: deduplicate on `eventId` (or on `id` + `status` for the `callback` event) and order by the event's own timestamp.
 
 | Property | Type | Required | Description |
 |---|---|---|---|
@@ -2247,12 +2429,14 @@ Delivered as an HTTP `POST` with `Content-Type: application/json` and `User-Agen
 | `courier` | string, nullable | no | Courier details (name/phone) for door delivery. Only with `readyForDelivery` and `deliveryType: door`. |
 | `office` | string, nullable | no | Pick-up office/locker details. With `readyForDelivery` (office/aps) and `notPickedUp`. |
 | `workingDaysPassed` | integer, nullable | no | Working days the parcel has been waiting. Only with `notPickedUp`. |
+| `eventId` | string (uuid) | yes | Globally unique id of this event. The same value is sent as the `X-Connectix-Event-Id` header. A delivery can be repeated (at-least-once): use it to drop duplicates. |
 
 ```json
 {
     "action": "readyForDelivery",
     "trackingNumber": "1053912345678",
     "deliveryType": "office",
-    "office": "Econt Sofia - Mladost 1, bl. 25"
+    "office": "Econt Sofia - Mladost 1, bl. 25",
+    "eventId": "c1f4b7a2-3d5e-4f60-8a9b-1c2d3e4f5a6b"
 }
 ```

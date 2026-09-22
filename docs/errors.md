@@ -22,6 +22,7 @@ Send `Accept: application/json` on every request; without it some errors are ren
 | 403 | The resource is restricted for this application, or a TrustCheck rule blocks it (`access_restricted`, `trustcheck_no_tracking`, `trustcheck_low_volume`); for OTP: maximum verification attempts exceeded | Contact support, or for TrustCheck enable automatic tracking / reach the daily volume |
 | 404 | Integration, hook or OTP not found | Check the identifier and that it belongs to this application |
 | 406 | Traffic for this company is banned, or there is no sender configured for the recipient's country | Contact support |
+| 409 | A request with the same `Idempotency-Key` is still running (`{"message": "in_progress", "retry_after": 2}`) | Wait `Retry-After` seconds and repeat the same request; you get the stored answer |
 | 410 | The OTP has expired or was already used | Send a new OTP |
 | 422 | Validation failed; the body maps field paths to messages | Fix the listed fields |
 | 429 | OTP rate limit for this phone number | Wait before sending another OTP to the same number |
@@ -47,6 +48,8 @@ Common causes:
 
 ## Retrying
 
-- Retry 5xx and network errors with exponential back-off; message sends are not idempotent, so keep your own record of what was accepted (the `id` in the 200 response) before retrying.
-- Never retry 4xx without changing the request, except 429 after the wait.
+- Send every message and OTP with an `Idempotency-Key` header (a fresh UUID per logical send). Then a timeout or a 5xx can simply be retried with the same key: the API answers with the stored result (`Idempotent-Replayed: true`) if the first attempt went through, and sends normally if it did not.
+- Without a key, retry only network errors that happened before the request was sent, and reconcile through `GET /messages` (filter by `reference`) before sending again.
+- Retry 5xx with exponential back-off. Never retry 4xx without changing the request, except 429 after the wait and 409 after `Retry-After`.
+- A 422 with `[idempotencyKey]` means the key was reused with a different request: use a new key.
 

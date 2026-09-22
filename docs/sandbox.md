@@ -28,7 +28,8 @@ Everything that is not "sending": the sandbox token authenticates the same appli
 - `POST /integration/register` and the hook endpoints create real integrations and hooks.
 - `POST /shipments` registers real shipments for tracking.
 - `POST /shopper/check` runs a real TrustCheck query (and needs the same eligibility).
-- Validation, phone parsing and the 4xx responses are identical.
+- `Idempotency-Key`, `reference`, `GET /messages/{id}` and `GET /messages` work the same way (on the sandbox messages).
+- Validation, phone parsing and the 4xx responses are identical, including the public-URL rule for `callbackUrl`/`inboundUrl`.
 
 Treat those as real data, because they are.
 

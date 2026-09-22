@@ -27,7 +27,7 @@ Content type: `application/json`. Required.
 |---|---|---|---|
 | `token` | string | yes | Integration token returned by `registerIntegration`. |
 | `type` | object (HookType), one of: callback, inbound, template, tracking, blacklist | yes | `callback` = message delivery status, `inbound` = reply from a recipient, `template` = a template was created or changed, `tracking` = shipment tracking event, `blacklist` = a blacklist entry changed. See the webhook definitions for the payloads. |
-| `url` | string (uri) | yes | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the webhook POST. |
+| `url` | string (uri) | yes | HTTP(S) URL with a public TLD (HTTPS recommended) that receives the webhook POST. Must be publicly reachable: hosts that resolve to private, loopback, link-local or metadata addresses are refused with 422 (`The URL must be a public http(s) address.`). |
 
 Example:
 

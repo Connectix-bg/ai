@@ -51,15 +51,17 @@ Sent on every status change of a message (not for campaign messages).
 
 ```json
 {
+  "eventId": "c1f4b7a2-3d5e-4f60-8a9b-1c2d3e4f5a6b",
   "id": "0d1c1c2e-8f2a-4c1e-9c2b-2d1a6d1f7e21",
   "status": "delivered",
   "channel": "viber",
   "createdAt": "2026-01-15T10:30:12+02:00",
+  "reference": "order-10042-shipped",
   "fallbackId": "7c2f0b1e-5a6d-4f3e-8b9a-1c2d3e4f5a6b"
 }
 ```
 
-`fallbackId` is present only for messages sent through `/messages/fallback`. Statuses: `pending`, `processing`, `received`, `scheduled`, `sent`, `delivered`, `seen`, `undelivered`, `failed`, `could_not_be_sent`, `fallback_error`.
+`eventId` is unique per delivery attempt group (see below). `reference` is the value you sent with the message and is present only then. `fallbackId` is present only for messages sent through `/messages/fallback`. Statuses: `pending`, `processing`, `received`, `scheduled`, `sent`, `delivered`, `seen`, `undelivered`, `failed`, `could_not_be_sent`, `fallback_error`.
 
 ### inbound — a reply from the recipient (Viber)
 
@@ -120,11 +122,52 @@ The template payload uses snake_case for the button fields (`button_label`, `but
 
 `deliveryType`, `courier`/`office` and `workingDaysPassed` are present when the courier reports them.
 
+## Every event: `eventId` and headers
+
+Every delivery carries a globally unique `eventId` in the body and the same value in the `X-Connectix-Event-Id` header. Deliveries are **at-least-once**: a receiver that timed out after processing gets the same event again, so drop what you have already seen by `eventId`. The order of events is not guaranteed; order by the event's own timestamp (`createdAt`, `sentAt`).
+
+## Signature
+
+Deliveries to an **integration hook** are signed with the integration `secret` you chose at `POST /integration/register`. Two headers come with each request:
+
+| Header | Value |
+|---|---|
+| `X-Connectix-Timestamp` | Unix time (seconds) of the delivery |
+| `X-Connectix-Signature` | `v1=` + hex HMAC-SHA256 of `"<timestamp>.<raw body>"` keyed with the secret |
+
+Verify before you parse the JSON, on the raw bytes of the body:
+
+```php
+$timestamp = $_SERVER['HTTP_X_CONNECTIX_TIMESTAMP'] ?? '';
+$signature = $_SERVER['HTTP_X_CONNECTIX_SIGNATURE'] ?? '';
+$body = file_get_contents('php://input');
+
+$expected = 'v1=' . hash_hmac('sha256', $timestamp . '.' . $body, $secret);
+if (!ctype_digit($timestamp) || abs(time() - (int) $timestamp) > 300 || !hash_equals($expected, $signature)) {
+    http_response_code(401);
+    exit;
+}
+```
+
+```js
+const crypto = require('node:crypto');
+const expected = 'v1=' + crypto.createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex');
+const fresh = Math.abs(Date.now() / 1000 - Number(timestamp)) <= 300;
+const valid = fresh && expected.length === signature.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+```
+
+Reject timestamps older than 5 minutes (replay window). Deliveries to a per-message `callbackUrl`/`inboundUrl` have no secret and are **not signed**: keep those URLs hard to guess and validate the `id` against your own records.
+
+## Retries
+
+Answer any `2xx` within the timeout (5 s, 10 s for tracking events) and do the work afterwards. A non-2xx answer (429 included) or a timeout is retried for that URL with growing delays: 30 s, 1 min, 2, 5, 10, 15, 30 min, 1, 2, 4, 8 and 16 hours. That is 12 more attempts over about 32 hours; after the last one the event is dropped for that URL and the hook stays active. Redirects are not followed. Each attempt is recorded and visible in the console under API usage.
+
+If you missed an event anyway, `GET /messages/{id}` and `GET /messages` read the current state of your messages back.
+
 ## Receiving hooks safely
 
-- Hooks are **unsigned** JSON POSTs today. Do not trust a payload by itself: look the `id` up in your own records (the message you sent, the hook you registered) before acting on it. A signature header is on the roadmap.
-- Answer `2xx` within a few seconds and do the work asynchronously. A non-2xx answer or a timeout (5 s, 10 s for tracking hooks) is logged and **not retried**: if a delivery is missed, reconcile through the API (`checkBlacklist`, `listTemplates`, your own message records).
-- Expect duplicates and out-of-order delivery; make handlers idempotent on `id` + `status`.
-- Use HTTPS URLs with a valid certificate; `http://` is accepted but not recommended.
+- Verify the signature on integration hooks; validate the `id` against your own records on per-message URLs.
+- Deduplicate by `eventId` (or by `id` + `status` for `callback` events) and do not rely on the order of events.
+- Use HTTPS URLs with a valid certificate; `http://` is accepted but not recommended. The URL must be publicly reachable: hosts that resolve to private, loopback, link-local or cloud-metadata addresses are refused with 422 when you register them.
 - In the sandbox the statuses are simulated, so test all transitions there before going live.
 

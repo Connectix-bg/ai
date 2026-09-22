@@ -49,8 +49,8 @@ headers are right before you write anything else.
 | Integrations | `registerIntegration`, `unregisterIntegration`, `registerIntegrationHook`, `unregisterIntegrationHook` | Register a shop/platform and its webhook URLs |
 | Blacklist | `checkBlacklist` POST /blacklist/check, `toggleBlacklist` POST /blacklist/toggle | `addToBlacklist` POST /blacklist is a deprecated alias of `checkBlacklist` (sunset 2027-03-31) - use `checkBlacklist` |
 | TrustCheck | `checkShopper` POST /shopper/check | Shopper reliability score by phone |
-| Tracking | `createShipment` POST /shipments | `createTracking` POST /trackings is deprecated - use `createShipment` |
-| Account | `getMe` GET /me, `listHolidays` GET /countries/holidays?country=bg | Whoami and public holidays (BG only) |
+| Tracking | `createShipment` POST /shipments | Register a courier shipment; events arrive on the `tracking` webhook |
+| Account | `getMe` GET /me | Whoami: the application the token belongs to |
 
 Use `list_endpoints` / `get_endpoint` (section 10) for request and response schemas; do not guess
 field names.
@@ -61,13 +61,29 @@ field names.
 curl -sS https://api-sandbox.connectix.bg/messages \
   -H "Authorization: $CONNECTIX_SANDBOX_TOKEN" \
   -H "Accept: application/json" -H "Content-Type: application/json" \
-  -d '{"phone":"+359888123456","template":"<template uuid>","parameters":{"orderId":"1042"}}'
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"phone":"+359888123456","template":"<template uuid>","parameters":{"orderId":"1042"},"reference":"order-1042-shipped"}'
 ```
+
+Always send both:
+
+- `Idempotency-Key` header: a fresh UUID per logical send. A retry with the same key returns the
+  stored answer (`Idempotent-Replayed: true`) instead of sending twice; 409 `in_progress` means
+  wait `Retry-After` and repeat; 422 `[idempotencyKey]` means the key was reused for a different
+  request.
+- `reference` (1-128 chars, `A-Z a-z 0-9 . _ : / -`): the caller's order/event id. It is echoed in
+  the answer and in every `callback`/`inbound` webhook of the message, so no mapping table is needed.
 
 Optional fields: `ttl` (60-86400 seconds), `callbackUrl` (status webhook), `inboundUrl` (reply
 webhook), `contact` (`firstName`, optional `lastName`, `groups`, `parameters`, `addGroupIfMissing`).
-The response is the message object: `id`, `phone` (E.164), `channel`, `status`, `price`, `parts`,
-`createdAt`.
+`callbackUrl`/`inboundUrl` must be public URLs (private, loopback and metadata addresses are refused
+with 422). The response is the message object: `id`, `phone` (E.164), `channel`, `status`, `price`,
+`parts`, `reference`, `createdAt`.
+
+Read a message back with `getMessage` (`GET /messages/{id}`, same object plus `updatedAt`) or list
+them with `listMessages` (`GET /messages?from=&to=&status=&channel=&reference=&limit=&cursor=`,
+window of at most 7 days, newest first, `next` cursor). Use these to reconcile after a missed
+webhook, never as a polling substitute for webhooks.
 
 ### Fallback (Viber first, SMS if not delivered)
 
@@ -108,9 +124,14 @@ blacklist and TrustCheck, and are **silently dropped** by `createShipment` - val
 ## 6. Webhooks
 
 Five hook types: `callback` (message status), `inbound` (replies), `blacklist`, `template`,
-`tracking`. They are plain JSON `POST`s to the URL you registered, currently **unsigned** - verify
-the payload against the API (`checkBlacklist`, `listTemplates`) before acting on it. Register per
-message (`callbackUrl`, `inboundUrl`) or per integration (`registerIntegrationHook`). Payloads are in
+`tracking`. They are JSON `POST`s to the URL you registered, per message (`callbackUrl`,
+`inboundUrl`) or per integration (`registerIntegrationHook`). Every event carries a unique `eventId`
+(body and `X-Connectix-Event-Id` header) - deduplicate on it, delivery is at-least-once and unordered.
+Deliveries to integration hooks are **signed**: `X-Connectix-Signature: v1=<hex HMAC-SHA256>` over
+`"<X-Connectix-Timestamp>.<raw body>"` with the integration `secret`; verify with a constant-time
+compare and a 5-minute window. Per-message URLs are unsigned. Non-2xx answers and timeouts are
+retried per URL with back-off (30 s up to 16 h, 12 attempts, about 32 hours). Answer 2xx fast and
+process asynchronously. Payloads and verification code are in
 [references/webhooks.md](references/webhooks.md); the spec carries them under `x-webhooks`.
 
 ## 7. Errors
@@ -123,7 +144,8 @@ Every error body is JSON: either a string message or an object of `field: messag
 | 401 | Missing/invalid token, or the company is not active | Check host and sandbox token |
 | 402 | Insufficient funds | Human tops up the balance (live only) |
 | 403 | Access restricted for this endpoint, OTP attempts exhausted, TrustCheck not eligible | Do not retry; tell the user |
-| 404 | Unknown OTP id, integration or hook | Check the id |
+| 404 | Unknown OTP id, integration, hook or message | Check the id |
+| 409 | The same `Idempotency-Key` is still being processed | Wait `Retry-After` seconds, repeat the same request |
 | 415 | Body is not `application/json` | Set `Content-Type` |
 | 422 | Validation errors as `{field: message}` | Fix the listed fields |
 | 429 | Rate limit (per token, and per phone for OTP) | Back off; respect `Retry-After` |
@@ -172,7 +194,8 @@ Postman collection (sandbox only; variables for the base URL and the token):
 1. `getMe` on the sandbox to confirm credentials.
 2. `listTemplates`; pick an approved template for the channel the user wants.
 3. Look the endpoint up with `get_endpoint`; write the request from the schema.
-4. Run it against the sandbox; handle every status in section 7 explicitly.
+4. Run it against the sandbox; handle every status in section 7 explicitly. Send with an
+   `Idempotency-Key` and a `reference`; verify webhook signatures; deduplicate on `eventId`.
 5. Write a test that hits the sandbox (or mocks the documented response) before asking the user to
    review.
 6. Transactional vs promotional: order, delivery and OTP messages are transactional; marketing sends

@@ -46,7 +46,7 @@ Example:
 | 403 | Access to this resource is disabled for the application (`access_restricted`), the TrustCheck eligibility rules are not met, or - on the production host only - an AI coding tool called a send/OTP route (`ai_tools_must_use_sandbox`: develop against the sandbox, going live is a human step). Returns object (Error). |
 | 404 | The referenced object (integration, hook, OTP) does not belong to this application or does not exist. Returns object (Error). |
 | 410 | The OTP has already expired or has already been used. Issue a new one with `sendOtp`. Returns object (Error). |
-| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Returns object (Error). |
+| 422 | Validation failed. The body maps each offending field path to a message. Unknown fields are rejected. Also answered when an `Idempotency-Key` is reused with a different request (`[idempotencyKey]`). Returns object (Error). |
 | 429 | Rate limited. Either the per-application request budget for the current minute is spent (`{"message": "rate_limited", "retry_after": <seconds>}` with a `Retry-After` header; every response carries `X-RateLimit-Remaining`), or - on the OTP routes - the per-phone OTP limit was reached (plain string, default 5 OTPs per hour per application). Wait and retry; do not tighten the loop. Returns object (Error). |
 | 500 | Unexpected server error while processing the OTP. Safe to retry once. Returns object (Error). |
 

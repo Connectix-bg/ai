@@ -3,6 +3,37 @@
 One entry per published contract version. The version equals `info.version` in `openapi.json`,
 `VERSION` in the GitHub mirror and the plugin manifests. Dates are release dates of the docs tag.
 
+## 1.2.0 — safe retries, references, signed and retried webhooks, read-back
+
+- `Idempotency-Key` header on `POST /messages`, `/messages/fallback`, `/messages/media` and
+  `/otp/send`: the 2xx answer of the first request is stored for 24 hours and replayed for every
+  repeat of the same key (`Idempotent-Replayed: true`); a repeat with a different request answers
+  422 `[idempotencyKey]`, a repeat while the first one is running answers 409 `in_progress` with
+  `Retry-After`.
+- `reference` (1-128 chars) on the same requests, echoed as `reference` in the answer and in the
+  `callback` and `inbound` webhooks; a fallback flow carries one reference across all its steps.
+- `GET /messages/{id}` (`getMessage`) and `GET /messages` (`listMessages`: `from`/`to` window of at
+  most 7 days, `status`, `channel`, `reference`, cursor pages) return the message object plus
+  `updatedAt`.
+- Webhooks: every event carries a unique `eventId` (body and `X-Connectix-Event-Id`); deliveries to
+  integration hooks are signed (`X-Connectix-Timestamp`, `X-Connectix-Signature: v1=<HMAC-SHA256>`
+  keyed with the integration secret); failed deliveries are retried per URL with back-off, 12 times
+  over about 32 hours; redirects are no longer followed. Payload schemas gained `eventId` (all) and
+  `reference` (`callback`, `inbound`).
+- Callback, inbound, hook and media URLs must be publicly reachable: private, loopback, link-local and
+  cloud-metadata addresses are refused with 422.
+- Unchanged for existing clients: every field and header is additive; receivers that ignore unknown
+  keys and headers keep working. The only behavioural change is that a receiver answering non-2xx now
+  sees retries.
+
+## 1.1.0 — contract trimmed to the offered surface
+
+- Removed from the public contract: `POST /trackings` (the deprecated alias of `POST /shipments`;
+  the route keeps working for existing callers until its 2027-03-31 sunset) and
+  `GET /countries/holidays` (an internal calendar helper, not part of the API offer). The
+  `Holidays` schema went with it. 17 documented operations remain.
+- No other change: requests, responses and webhooks of the remaining operations are as in 1.0.0.
+
 ## 1.0.0 — first public contract
 
 - First public OpenAPI 3.0.3 contract for the Connectix API, in English (`openapi.json`) and

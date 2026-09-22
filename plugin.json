@@ -1,7 +1,7 @@
 {
     "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
     "name": "connectix",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "description": "Connectix API skill and documentation server: Viber, SMS and Noti messaging, OTP, TrustCheck, blacklist and shipment tracking for Bulgarian businesses. Sandbox only (https://api-sandbox.connectix.bg).",
     "author": {
         "name": "Connectix",

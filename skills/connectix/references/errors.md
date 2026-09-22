@@ -8,7 +8,7 @@ Error bodies are JSON: a string (`"OTP has expired."`) or, for `422`, an object 
 
 | Status | Where | Meaning | Action |
 |---|---|---|---|
-| 400 | all | Invalid JSON body; missing required field (`createShipment`, integrations, blacklist, TrustCheck, holidays); template not found; message text too long; channel service not configured for the application; unsupported country for `listHolidays` (only `bg`) | Fix the request. The message says which |
+| 400 | all | Invalid JSON body; missing required field (`createShipment`, integrations, blacklist, TrustCheck); template not found; message text too long; channel service not configured for the application | Fix the request. The message says which |
 | 401 | all | No `Authorization` header, unknown token, token for the other host, company not active or traffic-banned. On `verifyOtp` also a wrong code (`{"verified": false, "remainingAttempts": n}`) | Check host and token; if the token is right, the account needs a human in the console |
 | 402 | send, OTP | Insufficient funds (live only) | Stop; the balance is a human task |
 | 403 | blacklist, TrustCheck, OTP verify | Endpoint restricted for this application; TrustCheck not eligible (body says why); OTP maximum attempts exceeded | Do not retry. For OTP, create a new one |
@@ -47,5 +47,6 @@ Error bodies are JSON: a string (`"OTP has expired."`) or, for `422`, an object 
 400/404/415    -> bug in the request, fix and redeploy
 401/402/403/406/451 -> stop and tell the user; a human resolves it in the console
 429            -> sleep(Retry-After or 60s), retry once
-502/500        -> retry with backoff (max 3), then fail
+409            -> sleep(Retry-After), repeat the same request with the same Idempotency-Key
+502/500        -> retry with backoff (max 3) using the SAME Idempotency-Key, then fail
 ```
