@@ -1,4 +1,4 @@
-# GEMINI.md
+# CLAUDE.md
 
 ## Connectix
 
@@ -18,5 +18,5 @@ shipment tracking).
    review. Handle every documented error status explicitly; never loop on `429`.
 5. Phones in E.164; templates must be approved; promotional sends check the blacklist first.
 
-<!-- Copy this section into your repository's GEMINI.md. Add the docs server to `.gemini/settings.json`:
-     {"mcpServers": {"connectix-docs": {"httpUrl": "https://mcp.connectix.bg/mcp"}}} -->
+<!-- Copy this section into your repository's CLAUDE.md. Install the plugin with
+     `claude plugin marketplace add connectix-bg/ai` and `claude plugin install connectix@connectix`. -->

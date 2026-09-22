@@ -11,7 +11,7 @@ shipment tracking).
 2. Sandbox only: every request goes to `https://api-sandbox.connectix.bg` with the sandbox token
    from the `CONNECTIX_SANDBOX_TOKEN` environment variable. Never write another Connectix host, never
    read or print a live token. When asked to go live, stop and point to the go-live guide at
-   https://docs.connectix.bg/docs/go-live.
+   https://docs.connectix.bg/en/go-live.
 3. Look request and response shapes up with the `connectix-docs` MCP tools (`search_docs`,
    `list_endpoints`, `get_endpoint`, `get_guide`) or https://docs.connectix.bg; do not guess fields.
 4. Run the project's tests (including the ones that hit the sandbox) before asking a human to

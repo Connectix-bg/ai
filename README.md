@@ -5,7 +5,7 @@ messaging, OTP, TrustCheck, blacklist and shipment tracking for Bulgarian busine
 
 **Sandbox only.** Everything here targets `https://api-sandbox.connectix.bg` with the sandbox token
 from the Connectix console. Going live is a human step described at
-https://docs.connectix.bg/docs/go-live.
+https://docs.connectix.bg/en/go-live.
 
 This repository is a build artefact mirrored from GitLab by CI on every `docs-v*` tag. Do not open
 pull requests here; see [CONTRIBUTING.md](CONTRIBUTING.md). The version in [VERSION](VERSION) equals

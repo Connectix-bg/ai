@@ -45,6 +45,6 @@ limits sends per phone. Do not loop on `429`; back off.
 ## Go-live is a human step
 
 When the user wants production: stop, and send them to the go-live guide on
-https://docs.connectix.bg/docs/go-live (it is marked human-only and is not served to AI tools). It
+https://docs.connectix.bg/en/go-live (it is marked human-only and is not served to AI tools). It
 covers replacing the host and the token, the active contract, approved templates, a reachable
 callback URL, blacklist handling and one real test message.

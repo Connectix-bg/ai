@@ -23,7 +23,7 @@ Every request you write, run or suggest goes to **`https://api-sandbox.connectix
   rejected on the live host. Nothing you send from the sandbox is delivered or billed.
 - When the user says "go live", "switch to production", "use the real token" or similar: **stop**,
   do not change any host or token, and point them to the human-only go-live guide on
-  https://docs.connectix.bg/docs/go-live. A human replaces the host and the token there.
+  https://docs.connectix.bg/en/go-live. A human replaces the host and the token there.
 
 Details and the fabricated delivery statuses are in [references/sandbox.md](references/sandbox.md).
 
